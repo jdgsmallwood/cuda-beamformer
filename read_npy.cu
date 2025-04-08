@@ -20,7 +20,7 @@ __global__ void print_first_five_elements(complex64 *d_data, int n_rows, int n_c
 
     if (idx < 5)
     {
-        printf("Antenna %d:\n", idx);
+        printf("Time step %d:\n", idx);
         for (int j = 0; j < 5 && j < n_cols; j++)
         {
             int index = idx * n_cols + j;
@@ -125,7 +125,7 @@ void read_npy_file(const char *filename, complex64 **data, int *n_rows, int *n_c
         printf("Antenna %i:\n", i);
         for (int j = 0; j < 5 && j < *n_cols; j++)
         {
-            printf("Complex %d: %.2f + %.2fi\n", j, (*data)[i * (*n_cols) + j].real, (*data)[i * (*n_cols) + j].imag);
+            printf("Complex %d: %.2f + %.2fi\n", j, (*data)[j * (*n_cols) + i].real, (*data)[j * (*n_cols) + i].imag);
         }
     }
 
@@ -135,7 +135,7 @@ void read_npy_file(const char *filename, complex64 **data, int *n_rows, int *n_c
 
 int main()
 {
-    const char *filename = "../all_data.npy";
+    const char *filename = "../antenna_data_transposed.npy";
     complex64 *data = NULL;
     int n_rows, n_cols;
     read_npy_file(filename, &data, &n_rows, &n_cols);
