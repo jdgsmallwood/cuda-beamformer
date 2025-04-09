@@ -5,6 +5,10 @@
 
 #define MAGIC_STRING "\x93NUMPY"
 #define MAGIC_STRING_LEN 6
+#define MAX_LINE_LENGTH 1024
+#define NUM_ANTENNAE 196
+#define WARPS_PER_BLOCK 7
+#define FULL_MASK 0xffffffff
 
 typedef struct
 {
@@ -12,20 +16,69 @@ typedef struct
     float imag;
 } complex64;
 
-__global__ void print_first_five_elements(complex64 *d_data, int n_rows, int n_cols)
+typedef struct
 {
-    // This kernel acts as a sanity check and will output the first 5 vals of each
-    // antenna datastream.
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int index;
+    float x_loc;
+    float y_loc;
+    float r;
+} Antenna;
 
-    if (idx < 5)
+__global__ void beamform(complex64 *d_data, const float *__restrict__ weights, const float *__restrict__ phase_offset, int n_rows, int n_cols, complex64 *d_output)
+{
+    __shared__ complex64 shared_sum[WARPS_PER_BLOCK];
+    int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // Each data point will have NUM_ANTENNAE threads associated with it
+    // So we can figure out which time step and antenna we are associated with.
+    int antenna = idx % NUM_ANTENNAE; // should be the same as the thread index in the block at this stage.
+
+    int warp_num = threadIdx.x / 32;
+    int thread_in_warp = threadIdx.x % 32;
+    complex64 final_shared_sum;
+    final_shared_sum.real = 0;
+    final_shared_sum.imag = 0;
+
+    complex64 sum;
+    sum.real = 0;
+    sum.imag = 0;
+
+    if (idx < n_cols * n_rows)
     {
-        printf("Time step %d:\n", idx);
-        for (int j = 0; j < 5 && j < n_cols; j++)
+        // printf("Antennae %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
+
+        sum.real += weights[antenna] * phase_offset[antenna] * d_data[idx].real;
+        sum.imag += weights[antenna] * phase_offset[antenna] * d_data[idx].imag;
+    }
+
+    for (int offset = 16; offset > 0; offset /= 2)
+    {
+        sum.real += __shfl_down_sync(FULL_MASK, sum.real, offset);
+        sum.imag += __shfl_down_sync(FULL_MASK, sum.imag, offset);
+    }
+
+    if (thread_in_warp == 0)
+    {
+        shared_sum[warp_num].real = sum.real;
+        shared_sum[warp_num].imag = sum.imag;
+    }
+
+    __syncthreads();
+
+    if (threadIdx.x < WARPS_PER_BLOCK)
+    {
+        final_shared_sum.real = shared_sum[threadIdx.x].real;
+        final_shared_sum.imag = shared_sum[threadIdx.x].imag;
+        for (int offset = 16; offset > 0; offset /= 2)
         {
-            int index = idx * n_cols + j;
-            printf("Complex %d,%d: %.2f + %.2fi\n", idx, j, d_data[index].real, d_data[index].imag);
+            final_shared_sum.real += __shfl_down_sync(FULL_MASK, final_shared_sum.real, offset);
+            final_shared_sum.imag += __shfl_down_sync(FULL_MASK, final_shared_sum.imag, offset);
         }
+    }
+
+    if (threadIdx.x == 0)
+    {
+        d_output[blockIdx.x].real = final_shared_sum.real;
+        d_output[blockIdx.x].imag = final_shared_sum.imag;
     }
 }
 
@@ -122,10 +175,10 @@ void read_npy_file(const char *filename, complex64 **data, int *n_rows, int *n_c
     printf("Data (first 5 complex numbers of each thread):\n");
     for (int i = 0; i < 5 && i < *n_rows; i++)
     {
-        printf("Antenna %i:\n", i);
+        printf("Time Step %i:\n", i);
         for (int j = 0; j < 5 && j < *n_cols; j++)
         {
-            printf("Complex %d: %.2f + %.2fi\n", j, (*data)[j * (*n_cols) + i].real, (*data)[j * (*n_cols) + i].imag);
+            printf("Complex %d: %.2f + %.2fi\n", j, (*data)[i * (*n_cols) + j].real, (*data)[i * (*n_cols) + j].imag);
         }
     }
 
@@ -133,8 +186,73 @@ void read_npy_file(const char *filename, complex64 **data, int *n_rows, int *n_c
     fclose(file);
 }
 
+Antenna *read_antenna_map()
+{
+    FILE *file = fopen("../antenna_locations_only_used.csv", "r");
+    if (!file)
+    {
+        perror("Could not open file");
+        return NULL;
+    }
+
+    Antenna *antennae = NULL;
+    cudaError_t err = cudaMallocHost((void **)&antennae, NUM_ANTENNAE * sizeof(Antenna));
+
+    char line[MAX_LINE_LENGTH];
+    // skip header
+    fgets(line, sizeof(line), file);
+    int count = 0;
+    // Read line by line
+    while (fgets(line, sizeof(line), file))
+    {
+        char *token = strtok(line, ",");
+
+        antennae[count].index = count;
+        antennae[count].x_loc = atof(token);
+
+        token = strtok(NULL, ",");
+        antennae[count].y_loc = atof(token);
+        token = strtok(NULL, ",");
+        antennae[count].r = atof(token);
+        count++;
+    }
+
+    fclose(file);
+    return antennae;
+}
+
 int main()
 {
+    Antenna *antennas = read_antenna_map();
+
+    float phase_offset[NUM_ANTENNAE];
+    float weights[NUM_ANTENNAE];
+    for (int i = 0; i < NUM_ANTENNAE; i++)
+    {
+        // weights[i] = 1 / antennas[i].r;
+        weights[i] = 1; // Make things easy to start with.
+        phase_offset[i] = 1;
+    }
+
+    float *d_weights = NULL;
+    cudaError_t err = cudaMalloc((void **)&d_weights, NUM_ANTENNAE * sizeof(float));
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory allocation failed\n");
+        return -1;
+    }
+
+
+    float *d_phase_offset = NULL;
+    err = cudaMalloc((void **)&d_phase_offset, NUM_ANTENNAE * sizeof(float));
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory allocation failed\n");
+        cudaFree(d_weights);
+        cudaFreeHost(antennas);
+        return -1;
+    }
+
     const char *filename = "../antenna_data_transposed.npy";
     complex64 *data = NULL;
     int n_rows, n_cols;
@@ -143,11 +261,41 @@ int main()
     printf("data has shape %i x %i\n", n_rows, n_cols);
 
     complex64 *d_data = NULL;
-    cudaError_t err = cudaMalloc((void **)&d_data, n_rows * n_cols * sizeof(complex64));
+    err = cudaMalloc((void **)&d_data, n_rows * n_cols * sizeof(complex64));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
         cudaFreeHost(data);
+        cudaFreeHost(antennas);
+        cudaFree(d_weights);
+        cudaFree(d_phase_offset);
+        return -1;
+    }
+
+    complex64 *d_output = NULL;
+    err = cudaMalloc((void **)&d_output, n_rows * sizeof(complex64));
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory allocation failed\n");
+        cudaFreeHost(data);
+        cudaFreeHost(antennas);
+        cudaFree(d_data);
+        cudaFree(d_weights);
+        cudaFree(d_phase_offset);
+        return -1;
+    }
+
+    complex64 *output = NULL;
+    err = cudaMallocHost((void **)&output, n_rows * sizeof(complex64));
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory allocation failed\n");
+        cudaFreeHost(data);
+        cudaFreeHost(antennas);
+        cudaFree(d_data);
+        cudaFree(d_output);
+        cudaFree(d_phase_offset);
+        cudaFree(d_weights);
         return -1;
     }
 
@@ -157,7 +305,42 @@ int main()
     {
         printf("CUDA stream creation failed\n");
         cudaFree(d_data);
+        cudaFree(d_output);
+        cudaFree(d_weights);
+        cudaFree(d_phase_offset);
         cudaFreeHost(data);
+        cudaFreeHost(output);
+        cudaFreeHost(antennas);
+        return -1;
+    }
+
+    err = cudaMemcpyAsync(d_weights, weights, NUM_ANTENNAE * sizeof(float), cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory copy failed\n");
+        cudaFree(d_weights);
+        cudaFree(d_data);
+        cudaFree(d_phase_offset);
+        cudaFree(d_output);
+        cudaFreeHost(data);
+        cudaFreeHost(output);
+        cudaFreeHost(antennas);
+        cudaStreamDestroy(stream);
+        return -1;
+    }
+
+    err = cudaMemcpyAsync(d_phase_offset, phase_offset, NUM_ANTENNAE * sizeof(float), cudaMemcpyHostToDevice, stream);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory copy failed\n");
+        cudaFree(d_weights);
+        cudaFree(d_data);
+        cudaFree(d_phase_offset);
+        cudaFree(d_output);
+        cudaFreeHost(data);
+        cudaFreeHost(output);
+        cudaFreeHost(antennas);
+        cudaStreamDestroy(stream);
         return -1;
     }
 
@@ -166,19 +349,15 @@ int main()
     {
         printf("CUDA memory copy failed\n");
         cudaFree(d_data);
+        cudaFree(d_weights);
+        cudaFree(d_phase_offset);
+        cudaFree(d_output);
         cudaFreeHost(data);
+        cudaFreeHost(output);
+        cudaFreeHost(antennas);
         cudaStreamDestroy(stream);
         return -1;
     }
-    // Define kernel execution configuration
-    int threadsPerBlock = 256;
-    int blocksPerGrid = (n_rows + threadsPerBlock - 1) / threadsPerBlock; // Round up the number of blocks
-
-    printf("CUDA Version...\n");
-
-    // Launch kernel to print first 5 elements of each antenna
-    print_first_five_elements<<<blocksPerGrid, threadsPerBlock>>>(d_data, n_rows, n_cols);
-
     // Check for kernel execution errors
     err = cudaGetLastError();
     if (err != cudaSuccess)
@@ -192,8 +371,50 @@ int main()
         printf("CUDA stream synchronization failed\n");
     }
 
+    beamform<<<n_rows, NUM_ANTENNAE>>>(d_data, d_weights, d_phase_offset, n_rows, n_cols, d_output);
+
+    err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA stream synchronization failed\n%s\n", cudaGetErrorString(err));
+    }
+
+    err = cudaMemcpyAsync(output, d_output, n_rows * sizeof(complex64), cudaMemcpyDeviceToHost, stream);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory copy failed\n");
+        cudaFree(d_weights);
+        cudaFree(d_data);
+        cudaFree(d_phase_offset);
+        cudaFree(d_output);
+        cudaFreeHost(data);
+        cudaFreeHost(output);
+        cudaStreamDestroy(stream);
+        return -1;
+    }
+
+    err = cudaStreamSynchronize(stream);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA stream synchronization failed\n%s\n", cudaGetErrorString(err));
+    }
+
+    printf("First 5 values are...");
+    for (int i = 0; i < 5; i++)
+    {
+        printf("%f + %fi\n", output[i].real, output[i].imag);
+    }
+
+    printf("Last value is...");
+    printf("%f + %fi\n", output[n_rows - 1].real, output[n_rows - 1].imag);
+
     cudaFree(d_data);
+    cudaFree(d_weights);
+    cudaFree(d_phase_offset);
+    cudaFree(d_output);
+    cudaFreeHost(antennas);
     cudaFreeHost(data);
+    cudaFreeHost(output);
     cudaStreamDestroy(stream);
     return 0;
 }
