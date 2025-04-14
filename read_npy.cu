@@ -6,7 +6,8 @@
 #define MAGIC_STRING "\x93NUMPY"
 #define MAGIC_STRING_LEN 6
 #define MAX_LINE_LENGTH 1024
-#define NUM_ANTENNAE 196
+#define NUM_ANTENNAS 196
+#define NUM_BEAMS 5
 #define WARPS_PER_BLOCK 7
 #define FULL_MASK 0xffffffff
 
@@ -28,9 +29,10 @@ __global__ void beamform(complex64 *d_data, const float *__restrict__ weights, c
 {
     __shared__ complex64 shared_sum[WARPS_PER_BLOCK];
     int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    // Each data point will have NUM_ANTENNAE threads associated with it
+    int beam = blockIdx.y;
+    // Each data point will have NUM_ANTENNAS threads associated with it
     // So we can figure out which time step and antenna we are associated with.
-    int antenna = idx % NUM_ANTENNAE; // should be the same as the thread index in the block at this stage.
+    int antenna = idx % NUM_ANTENNAS; // should be the same as the thread index in the block at this stage.
 
     int warp_num = threadIdx.x / 32;
     int thread_in_warp = threadIdx.x % 32;
@@ -46,8 +48,8 @@ __global__ void beamform(complex64 *d_data, const float *__restrict__ weights, c
     {
         // printf("Antennae %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
 
-        sum.real += weights[antenna] * phase_offset[antenna] * d_data[idx].real;
-        sum.imag += weights[antenna] * phase_offset[antenna] * d_data[idx].imag;
+        sum.real += weights[beam * NUM_ANTENNAS + antenna] * phase_offset[beam * NUM_ANTENNAS + antenna] * d_data[idx].real;
+        sum.imag += weights[beam * NUM_ANTENNAS + antenna] * phase_offset[beam * NUM_ANTENNAS + antenna] * d_data[idx].imag;
     }
 
     for (int offset = 16; offset > 0; offset /= 2)
@@ -77,8 +79,15 @@ __global__ void beamform(complex64 *d_data, const float *__restrict__ weights, c
 
     if (threadIdx.x == 0)
     {
-        d_output[blockIdx.x].real = final_shared_sum.real;
-        d_output[blockIdx.x].imag = final_shared_sum.imag;
+
+
+        d_output[beam * n_rows + blockIdx.x].real = final_shared_sum.real;
+        d_output[beam * n_rows + blockIdx.x].imag = final_shared_sum.imag;
+
+        if(blockIdx.x == 0) {
+            printf("Beam %i: %f + %fi\n", beam, final_shared_sum.real, final_shared_sum.imag);
+            printf("Beam %i / block dim %i / blockidx %i\n", beam, blockDim.x, blockIdx.x);
+        }
     }
 }
 
@@ -196,7 +205,7 @@ Antenna *read_antenna_map()
     }
 
     Antenna *antennae = NULL;
-    cudaError_t err = cudaMallocHost((void **)&antennae, NUM_ANTENNAE * sizeof(Antenna));
+    cudaError_t err = cudaMallocHost((void **)&antennae, NUM_ANTENNAS * sizeof(Antenna));
 
     char line[MAX_LINE_LENGTH];
     // skip header
@@ -225,26 +234,28 @@ int main()
 {
     Antenna *antennas = read_antenna_map();
 
-    float phase_offset[NUM_ANTENNAE];
-    float weights[NUM_ANTENNAE];
-    for (int i = 0; i < NUM_ANTENNAE; i++)
+    float phase_offset[NUM_BEAMS * NUM_ANTENNAS];
+    float weights[NUM_BEAMS * NUM_ANTENNAS];
+    for (int beam = 0; beam < NUM_BEAMS; beam++) {
+    for (int i = 0; i < NUM_ANTENNAS; i++)
     {
         // weights[i] = 1 / antennas[i].r;
-        weights[i] = 1; // Make things easy to start with.
-        phase_offset[i] = 1;
+        weights[beam*NUM_ANTENNAS + i] = beam; // Make things easy to start with.
+        phase_offset[beam * NUM_ANTENNAS + i] = 1;
     }
+}
+    
 
     float *d_weights = NULL;
-    cudaError_t err = cudaMalloc((void **)&d_weights, NUM_ANTENNAE * sizeof(float));
+    cudaError_t err = cudaMalloc((void **)&d_weights, NUM_ANTENNAS * NUM_BEAMS * sizeof(float));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
         return -1;
     }
 
-
     float *d_phase_offset = NULL;
-    err = cudaMalloc((void **)&d_phase_offset, NUM_ANTENNAE * sizeof(float));
+    err = cudaMalloc((void **)&d_phase_offset, NUM_ANTENNAS * NUM_BEAMS * sizeof(float));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
@@ -273,7 +284,7 @@ int main()
     }
 
     complex64 *d_output = NULL;
-    err = cudaMalloc((void **)&d_output, n_rows * sizeof(complex64));
+    err = cudaMalloc((void **)&d_output, n_rows * NUM_BEAMS * sizeof(complex64));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
@@ -286,7 +297,7 @@ int main()
     }
 
     complex64 *output = NULL;
-    err = cudaMallocHost((void **)&output, n_rows * sizeof(complex64));
+    err = cudaMallocHost((void **)&output, n_rows * NUM_BEAMS * sizeof(complex64));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
@@ -314,7 +325,7 @@ int main()
         return -1;
     }
 
-    err = cudaMemcpyAsync(d_weights, weights, NUM_ANTENNAE * sizeof(float), cudaMemcpyHostToDevice, stream);
+    err = cudaMemcpyAsync(d_weights, weights, NUM_ANTENNAS *NUM_BEAMS * sizeof(float), cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess)
     {
         printf("CUDA memory copy failed\n");
@@ -329,7 +340,7 @@ int main()
         return -1;
     }
 
-    err = cudaMemcpyAsync(d_phase_offset, phase_offset, NUM_ANTENNAE * sizeof(float), cudaMemcpyHostToDevice, stream);
+    err = cudaMemcpyAsync(d_phase_offset, phase_offset, NUM_ANTENNAS * NUM_BEAMS * sizeof(float), cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess)
     {
         printf("CUDA memory copy failed\n");
@@ -371,7 +382,7 @@ int main()
         printf("CUDA stream synchronization failed\n");
     }
 
-    beamform<<<n_rows, NUM_ANTENNAE>>>(d_data, d_weights, d_phase_offset, n_rows, n_cols, d_output);
+    beamform<<<dim3(n_rows, NUM_BEAMS), NUM_ANTENNAS, 0, stream>>>(d_data, d_weights, d_phase_offset, n_rows, n_cols, d_output);
 
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess)
@@ -379,7 +390,7 @@ int main()
         printf("CUDA stream synchronization failed\n%s\n", cudaGetErrorString(err));
     }
 
-    err = cudaMemcpyAsync(output, d_output, n_rows * sizeof(complex64), cudaMemcpyDeviceToHost, stream);
+    err = cudaMemcpyAsync(output, d_output, n_rows * NUM_BEAMS * sizeof(complex64), cudaMemcpyDeviceToHost, stream);
     if (err != cudaSuccess)
     {
         printf("CUDA memory copy failed\n");
@@ -399,14 +410,16 @@ int main()
         printf("CUDA stream synchronization failed\n%s\n", cudaGetErrorString(err));
     }
 
-    printf("First 5 values are...");
+    for (int beam = 0; beam < NUM_BEAMS; beam++) {
+    printf("First 5 values of beam %i are...\n", beam);
     for (int i = 0; i < 5; i++)
     {
-        printf("%f + %fi\n", output[i].real, output[i].imag);
+        printf("%f + %fi\n", output[beam * n_rows + i].real, output[beam * n_rows + i].imag);
     }
 
-    printf("Last value is...");
-    printf("%f + %fi\n", output[n_rows - 1].real, output[n_rows - 1].imag);
+    printf("Last value is...\n");
+    //printf("%f + %fi\n", output[beam * (n_rows + 1) - 1].real, output[beam * (n_rows + 1) - 1].imag);
+}
 
     cudaFree(d_data);
     cudaFree(d_weights);
