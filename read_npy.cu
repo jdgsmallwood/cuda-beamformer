@@ -11,11 +11,7 @@
 #define WARPS_PER_BLOCK 7
 #define FULL_MASK 0xffffffff
 
-typedef struct
-{
-    float real;
-    float imag;
-} complex64;
+
 
 typedef struct
 {
@@ -25,69 +21,62 @@ typedef struct
     float r;
 } Antenna;
 
-__global__ void beamform(complex64 *d_data, const float *__restrict__ weights, const float *__restrict__ phase_offset, int n_rows, int n_cols, complex64 *d_output)
+__constant__ float d_weights[NUM_ANTENNAS * NUM_BEAMS];
+__constant__ float d_phase_offset[NUM_ANTENNAS * NUM_BEAMS];
+
+
+__global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_output)
 {
-    __shared__ complex64 shared_sum[WARPS_PER_BLOCK];
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int beam = blockIdx.y;
+    __shared__ float2 shared_sum[WARPS_PER_BLOCK];
+    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     // Each data point will have NUM_ANTENNAS threads associated with it
     // So we can figure out which time step and antenna we are associated with.
-    int antenna = idx % NUM_ANTENNAS; // should be the same as the thread index in the block at this stage.
 
-    int warp_num = threadIdx.x / 32;
-    int thread_in_warp = threadIdx.x % 32;
-    complex64 final_shared_sum;
-    final_shared_sum.real = 0;
-    final_shared_sum.imag = 0;
-
-    complex64 sum;
-    sum.real = 0;
-    sum.imag = 0;
+    float2 sum;
+    sum.x = 0;
+    sum.y = 0;
 
     if (idx < n_cols * n_rows)
     {
         // printf("Antennae %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
-
-        sum.real += weights[beam * NUM_ANTENNAS + antenna] * phase_offset[beam * NUM_ANTENNAS + antenna] * d_data[idx].real;
-        sum.imag += weights[beam * NUM_ANTENNAS + antenna] * phase_offset[beam * NUM_ANTENNAS + antenna] * d_data[idx].imag;
+        const float2 data = d_data[idx];
+        const int offset_to_read = blockIdx.y * NUM_ANTENNAS + threadIdx.x;
+        const float weight = d_weights[offset_to_read];
+        const float phase = d_phase_offset[offset_to_read];
+        sum.x += weight * phase * data.x;
+        sum.y +=weight * phase * data.y;
     }
 
     for (int offset = 16; offset > 0; offset /= 2)
     {
-        sum.real += __shfl_down_sync(FULL_MASK, sum.real, offset);
-        sum.imag += __shfl_down_sync(FULL_MASK, sum.imag, offset);
+        sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
+        sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
     }
 
-    if (thread_in_warp == 0)
+    // Is it the first thread in the warp?
+    if (threadIdx.x % 32== 0)
     {
-        shared_sum[warp_num].real = sum.real;
-        shared_sum[warp_num].imag = sum.imag;
+        // this is the warp number. 
+        shared_sum[(int)(threadIdx.x / 32)] = sum;
     }
 
     __syncthreads();
-
+    sum.x = 0;
+    sum.y = 0;
     if (threadIdx.x < WARPS_PER_BLOCK)
     {
-        final_shared_sum.real = shared_sum[threadIdx.x].real;
-        final_shared_sum.imag = shared_sum[threadIdx.x].imag;
+        sum = shared_sum[threadIdx.x];
         for (int offset = 16; offset > 0; offset /= 2)
         {
-            final_shared_sum.real += __shfl_down_sync(FULL_MASK, final_shared_sum.real, offset);
-            final_shared_sum.imag += __shfl_down_sync(FULL_MASK, final_shared_sum.imag, offset);
+            // can improve this by 1 loop.
+            sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
+            sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
         }
     }
 
     if (threadIdx.x == 0)
     {
-
-
-        d_output[beam * n_rows + blockIdx.x].real = final_shared_sum.real;
-        d_output[beam * n_rows + blockIdx.x].imag = final_shared_sum.imag;
-
-        if(blockIdx.x == 0) {
-            printf("Beam %i: %f + %fi\n", beam, final_shared_sum.real, final_shared_sum.imag);
-            printf("Beam %i / block dim %i / blockidx %i\n", beam, blockDim.x, blockIdx.x);
-        }
+        d_output[blockIdx.y * n_rows + blockIdx.x] = sum;
     }
 }
 
@@ -112,7 +101,7 @@ int extract_shape(const char *header, int *n_rows, int *n_cols)
     return 1;
 }
 
-void read_npy_file(const char *filename, complex64 **data, int *n_rows, int *n_cols)
+void read_npy_file(const char *filename, float2 **data, int *n_rows, int *n_cols)
 {
     FILE *file = fopen(filename, "rb");
     if (!file)
@@ -169,7 +158,7 @@ void read_npy_file(const char *filename, complex64 **data, int *n_rows, int *n_c
     int data_size = (*n_rows) * (*n_cols);
 
     // Use pinned memory to improve performance.
-    cudaError_t err = cudaMallocHost((void **)data, data_size * sizeof(complex64));
+    cudaError_t err = cudaMallocHost((void **)data, data_size * sizeof(float2));
     if (err != cudaSuccess)
     {
         perror("Memory allocation error");
@@ -178,7 +167,7 @@ void read_npy_file(const char *filename, complex64 **data, int *n_rows, int *n_c
         return;
     }
 
-    fread(*data, sizeof(complex64), data_size, file);
+    fread(*data, sizeof(float2), data_size, file);
 
     // Print first 5 elements of the first 5 antennae as a sanity check.
     printf("Data (first 5 complex numbers of each thread):\n");
@@ -187,7 +176,7 @@ void read_npy_file(const char *filename, complex64 **data, int *n_rows, int *n_c
         printf("Time Step %i:\n", i);
         for (int j = 0; j < 5 && j < *n_cols; j++)
         {
-            printf("Complex %d: %.2f + %.2fi\n", j, (*data)[i * (*n_cols) + j].real, (*data)[i * (*n_cols) + j].imag);
+            printf("Complex %d: %.2f + %.2fi\n", j, (*data)[i * (*n_cols) + j].x, (*data)[i * (*n_cols) + j].y);
         }
     }
 
@@ -245,34 +234,29 @@ int main()
     }
 }
     
-
-    float *d_weights = NULL;
-    cudaError_t err = cudaMalloc((void **)&d_weights, NUM_ANTENNAS * NUM_BEAMS * sizeof(float));
+    cudaError_t err = cudaMemcpyToSymbol(d_weights, weights, sizeof(float) * NUM_ANTENNAS * NUM_BEAMS);
     if (err != cudaSuccess)
     {
-        printf("CUDA memory allocation failed\n");
+        printf("CUDA copy to weights symbol failed.\n");
         return -1;
     }
 
-    float *d_phase_offset = NULL;
-    err = cudaMalloc((void **)&d_phase_offset, NUM_ANTENNAS * NUM_BEAMS * sizeof(float));
+    err = cudaMemcpyToSymbol(d_phase_offset, phase_offset, sizeof(float) * NUM_ANTENNAS * NUM_BEAMS);
     if (err != cudaSuccess)
     {
-        printf("CUDA memory allocation failed\n");
-        cudaFree(d_weights);
-        cudaFreeHost(antennas);
+        printf("CUDA copy to phase offset symbol failed.\n");
         return -1;
     }
 
     const char *filename = "../antenna_data_transposed.npy";
-    complex64 *data = NULL;
+    float2 *data = NULL;
     int n_rows, n_cols;
     read_npy_file(filename, &data, &n_rows, &n_cols);
-    printf("data %f, %f\n", data[0].real, data[0].imag);
+    printf("data %f, %f\n", data[0].x, data[0].y);
     printf("data has shape %i x %i\n", n_rows, n_cols);
 
-    complex64 *d_data = NULL;
-    err = cudaMalloc((void **)&d_data, n_rows * n_cols * sizeof(complex64));
+    float2 *d_data = NULL;
+    err = cudaMalloc((void **)&d_data, n_rows * n_cols * sizeof(float2));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
@@ -283,8 +267,8 @@ int main()
         return -1;
     }
 
-    complex64 *d_output = NULL;
-    err = cudaMalloc((void **)&d_output, n_rows * NUM_BEAMS * sizeof(complex64));
+    float2 *d_output = NULL;
+    err = cudaMalloc((void **)&d_output, n_rows * NUM_BEAMS * sizeof(float2));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
@@ -296,8 +280,8 @@ int main()
         return -1;
     }
 
-    complex64 *output = NULL;
-    err = cudaMallocHost((void **)&output, n_rows * NUM_BEAMS * sizeof(complex64));
+    float2 *output = NULL;
+    err = cudaMallocHost((void **)&output, n_rows * NUM_BEAMS * sizeof(float2));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
@@ -325,37 +309,7 @@ int main()
         return -1;
     }
 
-    err = cudaMemcpyAsync(d_weights, weights, NUM_ANTENNAS *NUM_BEAMS * sizeof(float), cudaMemcpyHostToDevice, stream);
-    if (err != cudaSuccess)
-    {
-        printf("CUDA memory copy failed\n");
-        cudaFree(d_weights);
-        cudaFree(d_data);
-        cudaFree(d_phase_offset);
-        cudaFree(d_output);
-        cudaFreeHost(data);
-        cudaFreeHost(output);
-        cudaFreeHost(antennas);
-        cudaStreamDestroy(stream);
-        return -1;
-    }
-
-    err = cudaMemcpyAsync(d_phase_offset, phase_offset, NUM_ANTENNAS * NUM_BEAMS * sizeof(float), cudaMemcpyHostToDevice, stream);
-    if (err != cudaSuccess)
-    {
-        printf("CUDA memory copy failed\n");
-        cudaFree(d_weights);
-        cudaFree(d_data);
-        cudaFree(d_phase_offset);
-        cudaFree(d_output);
-        cudaFreeHost(data);
-        cudaFreeHost(output);
-        cudaFreeHost(antennas);
-        cudaStreamDestroy(stream);
-        return -1;
-    }
-
-    err = cudaMemcpyAsync(d_data, data, n_rows * n_cols * sizeof(complex64), cudaMemcpyHostToDevice, stream);
+    err = cudaMemcpyAsync(d_data, data, n_rows * n_cols * sizeof(float2), cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess)
     {
         printf("CUDA memory copy failed\n");
@@ -382,7 +336,7 @@ int main()
         printf("CUDA stream synchronization failed\n");
     }
 
-    beamform<<<dim3(n_rows, NUM_BEAMS), NUM_ANTENNAS, 0, stream>>>(d_data, d_weights, d_phase_offset, n_rows, n_cols, d_output);
+    beamform<<<dim3(n_rows, NUM_BEAMS), NUM_ANTENNAS, 0, stream>>>(d_data, n_rows, n_cols, d_output);
 
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess)
@@ -390,7 +344,7 @@ int main()
         printf("CUDA stream synchronization failed\n%s\n", cudaGetErrorString(err));
     }
 
-    err = cudaMemcpyAsync(output, d_output, n_rows * NUM_BEAMS * sizeof(complex64), cudaMemcpyDeviceToHost, stream);
+    err = cudaMemcpyAsync(output, d_output, n_rows * NUM_BEAMS * sizeof(float2), cudaMemcpyDeviceToHost, stream);
     if (err != cudaSuccess)
     {
         printf("CUDA memory copy failed\n");
@@ -414,7 +368,7 @@ int main()
     printf("First 5 values of beam %i are...\n", beam);
     for (int i = 0; i < 5; i++)
     {
-        printf("%f + %fi\n", output[beam * n_rows + i].real, output[beam * n_rows + i].imag);
+        printf("%f + %fi\n", output[beam * n_rows + i].x, output[beam * n_rows + i].y);
     }
 
     printf("Last value is...\n");
