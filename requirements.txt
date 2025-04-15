@@ -1,0 +1,3 @@
+jupyterlab
+mlflow
+python-dotenv

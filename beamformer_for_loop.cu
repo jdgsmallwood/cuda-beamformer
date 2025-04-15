@@ -11,8 +11,6 @@
 #define WARPS_PER_BLOCK 7
 #define FULL_MASK 0xffffffff
 
-
-
 typedef struct
 {
     int index;
@@ -24,7 +22,6 @@ typedef struct
 __constant__ float d_weights[NUM_ANTENNAS * NUM_BEAMS];
 __constant__ float d_phase_offset[NUM_ANTENNAS * NUM_BEAMS];
 
-
 __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_output)
 {
     __shared__ float2 shared_sum[WARPS_PER_BLOCK * NUM_BEAMS];
@@ -34,60 +31,56 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
 
     float2 sum;
 
-
-    for (int beam = 0; beam < NUM_BEAMS; beam++) {     
-    sum.x = 0;
-    sum.y = 0;
-    if (idx < n_cols * n_rows)
+    for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
-        // printf("Antenna %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
-        const float2 data = d_data[idx];
-        const int offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
-        const float weight = d_weights[offset_to_read];
-        const float phase = d_phase_offset[offset_to_read];
-        sum.x += weight * phase * data.x;
-        sum.y +=weight * phase * data.y;
-       
-    }
+        sum.x = 0;
+        sum.y = 0;
+        if (idx < n_cols * n_rows)
+        {
+            // printf("Antenna %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
+            const float2 data = d_data[idx];
+            const int offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
+            const float weight = d_weights[offset_to_read];
+            const float phase = d_phase_offset[offset_to_read];
+            sum.x += weight * phase * data.x;
+            sum.y += weight * phase * data.y;
+        }
 
-    for (int offset = 16; offset > 0; offset /= 2)
-    {
-        sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
-        sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
-    }
+        for (int offset = 16; offset > 0; offset /= 2)
+        {
+            sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
+            sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
+        }
 
-    // Is it the first thread in the warp?
-    if (threadIdx.x % 32== 0)
-    {
-        // this is the warp number. 
-        shared_sum[beam * WARPS_PER_BLOCK + (int)(threadIdx.x / 32)] = sum;
+        // Is it the first thread in the warp?
+        if (threadIdx.x % 32 == 0)
+        {
+            // this is the warp number.
+            shared_sum[beam * WARPS_PER_BLOCK + (int)(threadIdx.x / 32)] = sum;
+        }
     }
-}
 
     __syncthreads();
     sum.x = 0;
     sum.y = 0;
     if (threadIdx.x < WARPS_PER_BLOCK)
     {
-        for (int beam = 0; beam < NUM_BEAMS; beam++) {
-        sum = shared_sum[beam * WARPS_PER_BLOCK + threadIdx.x];
-        for (int offset = 16; offset > 0; offset /= 2)
+        for (int beam = 0; beam < NUM_BEAMS; beam++)
         {
-            // can improve this by 1 loop.
-            sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
-            sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
-        }
-    
-    
-    if (threadIdx.x == 0)
-    {
-        // This is going to be strided...should go to beam-major?
-        d_output[blockIdx.x * n_rows + beam] = sum;
-    }
-}
-    }
+            sum = shared_sum[beam * WARPS_PER_BLOCK + threadIdx.x];
+            for (int offset = 16; offset > 0; offset /= 2)
+            {
+                // can improve this by 1 loop.
+                sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
+                sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
+            }
 
-    
+            if (threadIdx.x == 0)
+            {
+                d_output[blockIdx.x * NUM_BEAMS + beam] = sum;
+            }
+        }
+    }
 }
 
 int extract_shape(const char *header, int *n_rows, int *n_cols)
@@ -235,15 +228,16 @@ int main()
 
     float phase_offset[NUM_BEAMS * NUM_ANTENNAS];
     float weights[NUM_BEAMS * NUM_ANTENNAS];
-    for (int beam = 0; beam < NUM_BEAMS; beam++) {
-    for (int i = 0; i < NUM_ANTENNAS; i++)
+    for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
-        // weights[i] = 1 / antennas[i].r;
-        weights[beam*NUM_ANTENNAS + i] = beam; // Make things easy to start with.
-        phase_offset[beam * NUM_ANTENNAS + i] = 1;
+        for (int i = 0; i < NUM_ANTENNAS; i++)
+        {
+            // weights[i] = 1 / antennas[i].r;
+            weights[beam * NUM_ANTENNAS + i] = beam; // Make things easy to start with.
+            phase_offset[beam * NUM_ANTENNAS + i] = 1;
+        }
     }
-}
-    
+
     cudaError_t err = cudaMemcpyToSymbol(d_weights, weights, sizeof(float) * NUM_ANTENNAS * NUM_BEAMS);
     if (err != cudaSuccess)
     {
@@ -374,15 +368,16 @@ int main()
         printf("CUDA stream synchronization failed\n%s\n", cudaGetErrorString(err));
     }
 
-    for (int beam = 0; beam < NUM_BEAMS; beam++) {
-    printf("First 5 values of beam %i are...\n", beam);
-    for (int i = 0; i < 5; i++)
+    for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
-        printf("%f + %fi\n", output[i * n_rows + beam].x, output[i * n_rows + beam].y);
-    }
+        printf("First 5 values of beam %i are...\n", beam);
+        for (int i = 0; i < 5; i++)
+        {
+            printf("%f + %fi\n", output[i * n_rows + beam].x, output[i * n_rows + beam].y);
+        }
 
-    //printf("%f + %fi\n", output[beam * (n_rows + 1) - 1].real, output[beam * (n_rows + 1) - 1].imag);
-}
+        // printf("%f + %fi\n", output[beam * (n_rows + 1) - 1].real, output[beam * (n_rows + 1) - 1].imag);
+    }
 
     cudaFree(d_data);
     cudaFree(d_weights);
