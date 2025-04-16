@@ -1,3 +1,6 @@
 jupyterlab
 mlflow
-python-dotenv
+pandas
+black
+nbstripout
+loguru
