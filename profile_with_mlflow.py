@@ -7,6 +7,8 @@ import argparse
 import time
 import pandas as pd
 from loguru import logger
+from datetime import datetime
+from pytz import timezone
 
 
 def get_git_commit():
@@ -43,7 +45,7 @@ REMOTE_CU = f"{REMOTE_PATH}/{LOCAL_CU_FILE}"
 REMOTE_EXEC_NAME = "beamformer"
 REMOTE_EXEC = f"./{REMOTE_EXEC_NAME}"
 REMOTE_HOST = "nt"
-PROFILE_OUTPUT = "profile"
+PROFILE_OUTPUT = f"profile_{datetime.now(tz=timezone('Australia/Sydney')).strftime('%Y%m%d_%H%M')}"
 LOCAL_OUTPUT_DIR = "./profile_results"
 SLURM_FILE_NAME = "submit_job.sh"
 
@@ -66,11 +68,11 @@ params = {
 # This will spin up a session with a GPU, compile and profile the code, then create a CSV file for output.
 slurm_script = f"""#!/bin/bash
 #
-#SBATCH --job-name=test
+#SBATCH --job-name=profile
 #SBATCH --output=test_%j.txt
 #
 #SBATCH --ntasks=1
-#SBATCH --time=10:00
+#SBATCH --time=02:30
 #SBATCH --mem=16g
 #SBATCH --gres=gpu:1
 
@@ -95,35 +97,10 @@ subprocess.run(["rsync", "-avz", SLURM_FILE_NAME, f"{REMOTE_HOST}:{REMOTE_PATH}"
 
 # === Step 7: Compile and profile remotely ===
 logger.info("Submitting slurm job...")
-result = subprocess.run(
-    f'ssh {REMOTE_HOST} -t "sbatch {REMOTE_PATH}/submit_job.sh"',
+subprocess.run(
+    f'ssh {REMOTE_HOST} -t "cd {REMOTE_PATH} && sbatch -W submit_job.sh"',
     shell=True,
-    capture_output=True,
-    text=True,
 )
-
-output = result.stdout.strip()
-
-job_id = None
-if "Submitted batch job" in output:
-    job_id = output.split()[-1]
-else:
-    raise RuntimeError("Failed to get SLURM job ID.")
-
-# Poll until job finishes
-while True:
-    cum_time = 0
-    check_cmd = f"ssh {REMOTE_HOST} -t 'squeue -j {job_id}'"
-    check = subprocess.run(check_cmd, shell=True, capture_output=True, text=True)
-    if job_id not in check.stdout:
-        logger.info(f"Job {job_id} is done!")
-        break
-    else:
-        logger.info(f"Waiting for job {job_id}...")
-        time.sleep(10)
-        cum_time += 10
-        if cum_time >= 10_000:
-            raise Exception("Timeout!")
 
 
 # === Step 8: Pull back results ===
