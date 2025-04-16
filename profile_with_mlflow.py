@@ -9,6 +9,12 @@ import pandas as pd
 from loguru import logger
 
 
+def get_git_commit():
+    try:
+        return subprocess.check_output(["git", "rev-parse", "HEAD"]).strip().decode("utf-8")
+    except subprocess.CalledProcessError:
+        return "unknown"
+
 mlflow.set_tracking_uri("http://localhost:5000")
 mlflow.set_experiment("2025-beamforming-cuda-optimization")
 
@@ -132,10 +138,16 @@ subprocess.run(
     ]
 )
 
+subprocess.run(
+    [
+        "rsync",
+        "-avz",
+        f"{REMOTE_HOST}:{REMOTE_PATH}/{PROFILE_OUTPUT}.ncu-rep",
+        LOCAL_OUTPUT_DIR,
+    ]
+)
+
 local_rep_path = os.path.join(LOCAL_OUTPUT_DIR, f"{PROFILE_OUTPUT}.csv")
-
-
-
 
 # === Step 9: Log results to MLFlow ===
 def extract_metric(df, metric: str):
@@ -174,21 +186,33 @@ def extract_parameters_from_csv(df):
     return params
 
 logger.info("Starting MLFlow run...")
-with mlflow.start_run() as run:
-    mlflow.log_param("run_description", args.run_description)
-    mlflow.log_param("change_description", args.change_description)
-    mlflow.log_param("hypothesis", args.hypothesis)
+description = f"""
+**Description**
+{args.run_description}
 
+**Changes Made**
+{args.change_description}
+
+**Hypothesis**
+{args.hypothesis}
+"""
+
+
+with mlflow.start_run(description=description) as run:
     profile_path = f"{os.path.join(LOCAL_OUTPUT_DIR, PROFILE_OUTPUT)}.csv"
     data = pd.read_csv(profile_path)
     params = extract_parameters_from_csv(data)
     logger.info("Logging parameters...")
     mlflow.log_params(params)
+    mlflow.log_param("git_commit_hash", get_git_commit())
 
     logger.info("Logging metrics...")
-    metrics = extract_metrics_from_csv(csv_text)
+    metrics = extract_metrics_from_csv(data)
     mlflow.log_metrics(metrics)
 
-    mlflow.log_artifact(profile_path, artifact_path=f"parsed_page")
+    mlflow.log_artifact(profile_path)
+    # log the original ncu-rep file as well.
+    mlflow.log_artifact(profile_path.replace('.csv', '.ncu-rep'))
+    mlflow.log_artifact(LOCAL_CU_FILE)
 
     logger.info(f"✅ MLflow run completed: {run.info.run_id}")
