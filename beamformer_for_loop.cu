@@ -31,10 +31,10 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
 
     float2 sum;
 
+    #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
-        sum.x = 0;
-        sum.y = 0;
+        sum = {0.0f, 0.0f};
         if (idx < n_cols * n_rows)
         {
             // printf("Antenna %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
@@ -45,7 +45,8 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
             sum.x += weight * phase * data.x;
             sum.y += weight * phase * data.y;
         }
-
+        
+        #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2)
         {
             sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
@@ -61,10 +62,13 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
     }
 
     __syncthreads();
-    sum.x = 0;
-    sum.y = 0;
+    
+    // This sum is necessary as threads above WARPS_PER_BLOCK are also participating
+    // in the reduction.
+    sum = {0.0f, 0.0f};
     if (threadIdx.x < WARPS_PER_BLOCK)
     {
+        #pragma unroll
         for (int beam = 0; beam < NUM_BEAMS; beam++)
         {
             sum = shared_sum[beam * WARPS_PER_BLOCK + threadIdx.x];
@@ -74,6 +78,7 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
                 sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
                 sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
             }
+
 
             if (threadIdx.x == 0)
             {
