@@ -85,9 +85,26 @@ srun cd {params['REMOTE_PATH']} && \\
     ncu --import {params['PROFILE_OUTPUT']}.ncu-rep --csv --page details > {params['PROFILE_OUTPUT']}.csv
 """
 
+slurm_script_debug = f"""#!/bin/bash
+#
+#SBATCH --job-name=profile
+#SBATCH --output={params['JOB_OUTPUT_FILE_NAME']}
+#
+#SBATCH --ntasks=1
+#SBATCH --time=02:30
+#SBATCH --mem=16g
+#SBATCH --gres=gpu:1
+
+srun cd {params['REMOTE_PATH']} && \\
+    source setup.sh && \\
+    nvcc -G -g {params['LOCAL_CU_FILE']} -o {params['REMOTE_EXEC_NAME']}  && \\
+    ncu -f --source-file=all --source-line=all --set full --target-processes all --export {params['PROFILE_OUTPUT']} {params['REMOTE_EXEC']} && \\
+    ncu --import {params['PROFILE_OUTPUT']}.ncu-rep --csv --page details > {params['PROFILE_OUTPUT']}.csv
+"""
+
 # Write to file
 with open("submit_job.sh", "w") as f:
-    f.write(slurm_script)
+    f.write(slurm_script_debug)
 
 logger.info("Slurm script written to 'submit_job.sh'")
 
