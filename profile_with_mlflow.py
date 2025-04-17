@@ -78,7 +78,7 @@ slurm_script = f"""#!/bin/bash
 
 srun cd {params['REMOTE_PATH']} && \\
     source setup.sh && \\
-    nvcc {params['LOCAL_CU_FILE']} -o {params['REMOTE_EXEC_NAME']} && \\
+    nvcc --gpu-architecture=sm_80 -O3 --use_fast_math {params['LOCAL_CU_FILE']} -o {params['REMOTE_EXEC_NAME']}  && \\
     ncu -f --set full --target-processes all --export {params['PROFILE_OUTPUT']} {params['REMOTE_EXEC']} && \\
     ncu --import {params['PROFILE_OUTPUT']}.ncu-rep --csv --page details > {params['PROFILE_OUTPUT']}.csv
 """
