@@ -20,7 +20,7 @@ typedef struct
     float r;
 } Antenna;
 
-typedef struct __align__(8)
+typedef struct __align__(16)
 {
     float2 data[NUM_BEAMS];
 } float2_beamarray;
@@ -28,8 +28,7 @@ typedef struct __align__(8)
 
 __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output, const float2_beamarray __restrict__ *d_weights_and_phase)
 {
-    __shared__ float2 shared_sum[WARPS_PER_BLOCK * NUM_BEAMS];
-    __shared__ float2 shared_beam_sum[NUM_BEAMS];
+    __shared__ float2 shared_sum[NUM_BEAMS];
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     // Each data point will have NUM_ANTENNAS threads associated with it
     // So we can figure out which time step and antenna we are associated with.
@@ -37,6 +36,10 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
     float2 sum, weight_and_phase;
     const float2 data = d_data[idx];
     const float2_beamarray weights_and_phase = d_weights_and_phase[threadIdx.x];
+
+    if (threadIdx.x < NUM_BEAMS) {
+        shared_sum[threadIdx.x] = {0.0f, 0.0f};
+    }
 
 #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
@@ -55,43 +58,16 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
         // Is it the first thread in the warp?
         if (threadIdx.x % 32 == 0)
         {
-            // this is the warp number.
-            shared_sum[beam * WARPS_PER_BLOCK + (int)(threadIdx.x / 32)] = sum;
+            atomicAdd(&shared_sum[beam].x, sum.x);
+            atomicAdd(&shared_sum[beam].y, sum.y);
         }
     }
 
     __syncthreads();
 
-#pragma unroll
-    for (int beam = 0; beam < NUM_BEAMS; beam++)
-    {
-        if (threadIdx.x < WARPS_PER_BLOCK)
-        {
-
-            sum = shared_sum[beam * WARPS_PER_BLOCK + threadIdx.x];
-        }
-        else
-        {
-            sum = {0.0f, 0.0f};
-        }
-#pragma unroll
-        for (int offset = 16; offset > 0; offset /= 2)
-        {
-            // can improve this by 1 loop.
-            sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
-            sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
-        }
-
-        if (threadIdx.x == 0)
-        {
-            shared_beam_sum[beam] = sum;
-        }
-    }
-    // might need a syncthreads here for larger number of beams.
-
     if (threadIdx.x < NUM_BEAMS)
     {
-        d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_beam_sum[threadIdx.x];
+        d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_sum[threadIdx.x];
     }
 }
 
