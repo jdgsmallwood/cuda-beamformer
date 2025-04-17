@@ -20,9 +20,15 @@ typedef struct
     float r;
 } Antenna;
 
+typedef struct __align__(16)
+{
+    float2 data[NUM_BEAMS];
+} float2_beamarray;
+
+
 //__constant__ float2 d_weights_and_phase[NUM_ANTENNAS * NUM_BEAMS];
 
-__global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output, const float2 __restrict__ *d_weights_and_phase)
+__global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output, const float2_beamarray __restrict__ *d_weights_and_phase)
 {
     __shared__ float2 shared_sum[WARPS_PER_BLOCK * NUM_BEAMS];
     __shared__ float2 shared_beam_sum[NUM_BEAMS];
@@ -32,16 +38,13 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
     
     float2 sum, weight_and_phase;
     const float2 data = d_data[idx];
-
-    int offset_to_read;
+    const float2_beamarray weights_and_phase = d_weights_and_phase[threadIdx.x];
 
 #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
         // printf("Antenna %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
-        offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
-        weight_and_phase = d_weights_and_phase[offset_to_read];
-        
+        weight_and_phase = weights_and_phase.data[beam];
         sum.x = weight_and_phase.y * data.x - data.y * weight_and_phase.x;
         sum.y = data.x * weight_and_phase.x + data.y * weight_and_phase.y;
 
@@ -240,7 +243,7 @@ int main()
 
     float phase_offset[NUM_BEAMS * NUM_ANTENNAS];
     float weights[NUM_BEAMS * NUM_ANTENNAS];
-    float2 weights_and_phase[NUM_BEAMS * NUM_ANTENNAS];
+    float2_beamarray weights_and_phase[NUM_ANTENNAS];
 
     float sin_phase, cos_phase;
     for (int beam = 0; beam < NUM_BEAMS; beam++)
@@ -248,17 +251,17 @@ int main()
         for (int i = 0; i < NUM_ANTENNAS; i++)
         {
             // weights[i] = 1 / antennas[i].r;
-            weights[beam * NUM_ANTENNAS + i] = beam; // Make things easy to start with.
-            phase_offset[beam * NUM_ANTENNAS + i] = 0;
+            int offset = i * NUM_BEAMS + beam;
+            weights[offset] = beam; // Make things easy to start with.
+            phase_offset[offset] = 0;
 
-            sincosf(phase_offset[beam * NUM_ANTENNAS + i], &sin_phase, &cos_phase);
-            weights_and_phase[beam * NUM_ANTENNAS + i] = {sin_phase * weights[beam * NUM_ANTENNAS + i], cos_phase * weights[beam * NUM_ANTENNAS + i]};
+            sincosf(phase_offset[offset], &sin_phase, &cos_phase);
+            weights_and_phase[i].data[beam] = {sin_phase * weights[offset], cos_phase * weights[offset]};
         }
     }
 
-
-    float2 *d_weights_and_phase = NULL;
-    cudaError_t err = cudaMalloc((void **)&d_weights_and_phase, sizeof(float2) * NUM_BEAMS * NUM_ANTENNAS);
+    float2_beamarray *d_weights_and_phase = NULL;
+    cudaError_t err = cudaMalloc((void **)&d_weights_and_phase, sizeof(float2_beamarray) * NUM_ANTENNAS);
     if (err != cudaSuccess)
     {
         printf("CUDA copy to phase offset symbol failed.\n");
@@ -324,7 +327,7 @@ int main()
 
 
 
-    err = cudaMemcpyAsync(d_weights_and_phase,weights_and_phase, NUM_BEAMS * NUM_ANTENNAS * sizeof(float2), cudaMemcpyHostToDevice, stream);
+    err = cudaMemcpyAsync(d_weights_and_phase,weights_and_phase, NUM_ANTENNAS * sizeof(float2_beamarray), cudaMemcpyHostToDevice, stream);
 
     if (err != cudaSuccess)
     {
