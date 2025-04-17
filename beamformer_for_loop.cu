@@ -26,20 +26,13 @@ __constant__ float d_phase_offset[NUM_ANTENNAS * NUM_BEAMS];
 __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output)
 {
     __shared__ float2 shared_sum[WARPS_PER_BLOCK * NUM_BEAMS];
+    __shared__ float2 shared_beam_sum[NUM_BEAMS];
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     // Each data point will have NUM_ANTENNAS threads associated with it
     // So we can figure out which time step and antenna we are associated with.
 
     float2 sum;
-    float2 data;
-    if (idx < n_cols * n_rows)
-    {
-        data = d_data[idx];
-    }
-    else
-    {
-        data = {0.0f, 0.0f};
-    }
+    const float2 data = d_data[idx];
 
     int offset_to_read;
     float weight, phase, cos_phase, sin_phase;
@@ -47,15 +40,14 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
 #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
-        sum = {0.0f, 0.0f};
         // printf("Antenna %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
         offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
         weight = d_weights[offset_to_read];
         phase = d_phase_offset[offset_to_read];
         sincosf(phase, &sin_phase, &cos_phase);
 
-        sum.x += weight * (cos_phase * data.x - data.y * sin_phase);
-        sum.y += weight * (data.x * sin_phase + data.y * cos_phase);
+        sum.x = weight * (cos_phase * data.x - data.y * sin_phase);
+        sum.y = weight * (data.x * sin_phase + data.y * cos_phase);
 
 #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2)
@@ -74,9 +66,6 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
 
     __syncthreads();
 
-    // This sum is necessary as threads above WARPS_PER_BLOCK are also participating
-    // in the reduction.
-    sum = {0.0f, 0.0f};
 #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
@@ -84,24 +73,29 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
         {
 
             sum = shared_sum[beam * WARPS_PER_BLOCK + threadIdx.x];
-            for (int offset = 16; offset > 0; offset /= 2)
-            {
-                // can improve this by 1 loop.
-                sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
-                sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
-            }
+        }
+        else
+        {
+            sum = {0.0f, 0.0f};
+        }
+#pragma unroll
+        for (int offset = 16; offset > 0; offset /= 2)
+        {
+            // can improve this by 1 loop.
+            sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
+            sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
+        }
 
-            if (threadIdx.x == 0)
-            {
-                shared_sum[beam] = sum;
-            }
+        if (threadIdx.x == 0)
+        {
+            shared_beam_sum[beam] = sum;
         }
     }
     // might need a syncthreads here for larger number of beams.
 
     if (threadIdx.x < NUM_BEAMS)
     {
-        d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_sum[threadIdx.x];
+        d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_beam_sum[threadIdx.x];
     }
 }
 
