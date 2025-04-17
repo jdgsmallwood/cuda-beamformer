@@ -22,7 +22,7 @@ typedef struct
 __constant__ float d_weights[NUM_ANTENNAS * NUM_BEAMS];
 __constant__ float d_phase_offset[NUM_ANTENNAS * NUM_BEAMS];
 
-__global__ void beamform(const float2* __restrict__ d_data, const int __restrict__ n_rows, const int __restrict__ n_cols, float2 __restrict__ *d_output)
+__global__ void beamform(const float2* __restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output)
 {
     __shared__ float2 shared_sum[WARPS_PER_BLOCK * NUM_BEAMS];
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
