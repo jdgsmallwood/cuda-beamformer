@@ -91,7 +91,7 @@ slurm_script_debug = f"""#!/bin/bash
 #SBATCH --output={params['JOB_OUTPUT_FILE_NAME']}
 #
 #SBATCH --ntasks=1
-#SBATCH --time=02:30
+#SBATCH --time=05:30
 #SBATCH --mem=16g
 #SBATCH --gres=gpu:1
 
@@ -104,7 +104,7 @@ srun cd {params['REMOTE_PATH']} && \\
 
 # Write to file
 with open("submit_job.sh", "w") as f:
-    f.write(slurm_script_debug)
+    f.write(slurm_script)
 
 logger.info("Slurm script written to 'submit_job.sh'")
 

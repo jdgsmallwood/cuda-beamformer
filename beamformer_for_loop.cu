@@ -4,7 +4,6 @@
 #include <math.h>
 #include <cuda_runtime.h>
 
-
 #define MAGIC_STRING "\x93NUMPY"
 #define MAGIC_STRING_LEN 6
 #define MAX_LINE_LENGTH 1024
@@ -24,7 +23,7 @@ typedef struct
 __constant__ float d_weights[NUM_ANTENNAS * NUM_BEAMS];
 __constant__ float d_phase_offset[NUM_ANTENNAS * NUM_BEAMS];
 
-__global__ void beamform(const float2* __restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output)
+__global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output)
 {
     __shared__ float2 shared_sum[WARPS_PER_BLOCK * NUM_BEAMS];
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -71,11 +70,11 @@ __global__ void beamform(const float2* __restrict__ d_data, const int n_rows, co
     // This sum is necessary as threads above WARPS_PER_BLOCK are also participating
     // in the reduction.
     sum = {0.0f, 0.0f};
-    if (threadIdx.x < WARPS_PER_BLOCK)
+#pragma unroll for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
-#pragma unroll
-        for (int beam = 0; beam < NUM_BEAMS; beam++)
+        if (threadIdx.x < WARPS_PER_BLOCK)
         {
+
             sum = shared_sum[beam * WARPS_PER_BLOCK + threadIdx.x];
             for (int offset = 16; offset > 0; offset /= 2)
             {
