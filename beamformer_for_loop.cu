@@ -46,7 +46,6 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
     {
         sum = {0.0f, 0.0f};
             // printf("Antenna %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
-            data = d_data[idx];
             offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
             weight = d_weights[offset_to_read];
             phase = d_phase_offset[offset_to_read];
