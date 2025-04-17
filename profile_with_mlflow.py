@@ -189,9 +189,9 @@ description = f"""
 with mlflow.start_run(description=description) as run:
     profile_path = f"{os.path.join(LOCAL_OUTPUT_DIR, PROFILE_OUTPUT)}.csv"
     data = pd.read_csv(profile_path)
-    params = extract_parameters_from_csv(data)
+    model_params = extract_parameters_from_csv(data)
     logger.info("Logging parameters...")
-    mlflow.log_params(params)
+    mlflow.log_params(model_params)
     mlflow.log_param("git_commit_hash", get_git_commit())
 
     logger.info("Logging metrics...")
