@@ -86,11 +86,16 @@ __global__ void beamform(const float2* __restrict__ d_data, const int n_rows, co
 
             if (threadIdx.x == 0)
             {
-                d_output[blockIdx.x * NUM_BEAMS + beam] = sum;
+                shared_sum[beam] = sum;
             }
         }
     }
     // might need a syncthreads here for larger number of beams.
+
+    if (threadIdx.x < NUM_BEAMS)
+    {
+        d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_sum[threadIdx.x];
+    }
 }
 
 int extract_shape(const char *header, int *n_rows, int *n_cols)
