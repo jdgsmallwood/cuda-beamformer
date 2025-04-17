@@ -44,7 +44,7 @@ __global__ void beamform(const float2* __restrict__ d_data, const int n_rows, co
             const int offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
             const float weight = d_weights[offset_to_read];
             const float phase = d_phase_offset[offset_to_read];
-            const float cos_phase, sin_phase;
+            float cos_phase, sin_phase;
             sincosf(phase, &sin_phase, &cos_phase);
 
             sum.x += weight * (cos_phase * data.x - data.y * sin_phase);
@@ -86,7 +86,7 @@ __global__ void beamform(const float2* __restrict__ d_data, const int n_rows, co
 
             if (threadIdx.x == 0)
             {
-                d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_sum[threadIdx.x];
+                d_output[blockIdx.x * NUM_BEAMS + beam] = sum;
             }
         }
     }
