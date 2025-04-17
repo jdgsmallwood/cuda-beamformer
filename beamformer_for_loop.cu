@@ -1,7 +1,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 #include <cuda_runtime.h>
+
 
 #define MAGIC_STRING "\x93NUMPY"
 #define MAGIC_STRING_LEN 6
@@ -42,8 +44,11 @@ __global__ void beamform(const float2* __restrict__ d_data, const int n_rows, co
             const int offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
             const float weight = d_weights[offset_to_read];
             const float phase = d_phase_offset[offset_to_read];
-            sum.x += weight * phase * data.x;
-            sum.y += weight * phase * data.y;
+            const float cos_phase, sin_phase;
+            sincosf(phase, &sin_phase, &cos_phase);
+
+            sum.x += weight * (cos_phase * data.x - data.y * sin_phase);
+            sum.y += weight * (data.x * sin_phase + data.y * cos_phase);
         }
 
 #pragma unroll
@@ -239,7 +244,7 @@ int main()
         {
             // weights[i] = 1 / antennas[i].r;
             weights[beam * NUM_ANTENNAS + i] = beam; // Make things easy to start with.
-            phase_offset[beam * NUM_ANTENNAS + i] = 1;
+            phase_offset[beam * NUM_ANTENNAS + i] = 0;
         }
     }
 
