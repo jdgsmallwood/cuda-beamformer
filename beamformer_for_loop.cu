@@ -22,7 +22,7 @@ typedef struct
 __constant__ float d_weights[NUM_ANTENNAS * NUM_BEAMS];
 __constant__ float d_phase_offset[NUM_ANTENNAS * NUM_BEAMS];
 
-__global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_output)
+__global__ void beamform(const float2* __restrict__ d_data, const int __restrict__ n_rows, const int __restrict__ n_cols, float2 __restrict__ *d_output)
 {
     __shared__ float2 shared_sum[WARPS_PER_BLOCK * NUM_BEAMS];
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
@@ -81,16 +81,11 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
 
             if (threadIdx.x == 0)
             {
-                shared_sum[beam] = sum;
+                d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_sum[threadIdx.x];
             }
         }
     }
     // might need a syncthreads here for larger number of beams.
-
-    if (threadIdx.x < NUM_BEAMS)
-    {
-        d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_sum[threadIdx.x];
-    }
 }
 
 int extract_shape(const char *header, int *n_rows, int *n_cols)
