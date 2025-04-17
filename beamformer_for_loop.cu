@@ -31,7 +31,7 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
 
     float2 sum;
 
-    #pragma unroll
+#pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
         sum = {0.0f, 0.0f};
@@ -45,8 +45,8 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
             sum.x += weight * phase * data.x;
             sum.y += weight * phase * data.y;
         }
-        
-        #pragma unroll
+
+#pragma unroll
         for (int offset = 16; offset > 0; offset /= 2)
         {
             sum.x += __shfl_down_sync(FULL_MASK, sum.x, offset);
@@ -62,13 +62,13 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
     }
 
     __syncthreads();
-    
+
     // This sum is necessary as threads above WARPS_PER_BLOCK are also participating
     // in the reduction.
     sum = {0.0f, 0.0f};
     if (threadIdx.x < WARPS_PER_BLOCK)
     {
-        #pragma unroll
+#pragma unroll
         for (int beam = 0; beam < NUM_BEAMS; beam++)
         {
             sum = shared_sum[beam * WARPS_PER_BLOCK + threadIdx.x];
@@ -79,12 +79,17 @@ __global__ void beamform(float2 *d_data, int n_rows, int n_cols, float2 *d_outpu
                 sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
             }
 
-
             if (threadIdx.x == 0)
             {
-                d_output[blockIdx.x * NUM_BEAMS + beam] = sum;
+                shared_sum[beam] = sum;
             }
         }
+    }
+    // might need a syncthreads here for larger number of beams.
+
+    if (threadIdx.x < NUM_BEAMS)
+    {
+        d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_sum[threadIdx.x];
     }
 }
 
