@@ -45,7 +45,8 @@ REMOTE_CU = f"{REMOTE_PATH}/{LOCAL_CU_FILE}"
 REMOTE_EXEC_NAME = "beamformer"
 REMOTE_EXEC = f"./{REMOTE_EXEC_NAME}"
 REMOTE_HOST = "nt"
-PROFILE_OUTPUT = f"profile_{datetime.now(tz=timezone('Australia/Sydney')).strftime('%Y%m%d_%H%M')}"
+DT_SUFFIX = datetime.now(tz=timezone('Australia/Sydney')).strftime('%Y%m%d_%H%M')
+PROFILE_OUTPUT = f"profile_{DT_SUFFIX}"
 LOCAL_OUTPUT_DIR = "./profile_results"
 SLURM_FILE_NAME = "submit_job.sh"
 
@@ -61,6 +62,7 @@ params = {
     "REMOTE_EXEC_NAME": REMOTE_EXEC_NAME,
     "PROFILE_OUTPUT": PROFILE_OUTPUT,
     "REMOTE_EXEC": REMOTE_EXEC,
+    "JOB_OUTPUT_FILE_NAME": f"profile_log_{DT_SUFFIX}.txt",
 }
 
 
@@ -69,7 +71,7 @@ params = {
 slurm_script = f"""#!/bin/bash
 #
 #SBATCH --job-name=profile
-#SBATCH --output=test_%j.txt
+#SBATCH --output={params['JOB_OUTPUT_FILE_NAME']}
 #
 #SBATCH --ntasks=1
 #SBATCH --time=02:30
@@ -120,6 +122,15 @@ subprocess.run(
         "rsync",
         "-avz",
         f"{REMOTE_HOST}:{REMOTE_PATH}/{PROFILE_OUTPUT}.ncu-rep",
+        LOCAL_OUTPUT_DIR,
+    ]
+)
+
+subprocess.run(
+    [
+        "rsync",
+        "-avz",
+        f"{REMOTE_HOST}:{REMOTE_PATH}/{params['JOB_OUTPUT_FILE_NAME']}",
         LOCAL_OUTPUT_DIR,
     ]
 )
@@ -191,5 +202,6 @@ with mlflow.start_run(description=description) as run:
     # log the original ncu-rep file as well.
     mlflow.log_artifact(profile_path.replace('.csv', '.ncu-rep'))
     mlflow.log_artifact(LOCAL_CU_FILE)
+    mlflow.log_artifact(os.path.join(LOCAL_OUTPUT_DIR, params['JOB_OUTPUT_FILE_NAME']))
 
     logger.info(f"✅ MLflow run completed: {run.info.run_id}")
