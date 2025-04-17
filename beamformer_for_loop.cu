@@ -70,7 +70,8 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
     // This sum is necessary as threads above WARPS_PER_BLOCK are also participating
     // in the reduction.
     sum = {0.0f, 0.0f};
-#pragma unroll for (int beam = 0; beam < NUM_BEAMS; beam++)
+#pragma unroll 
+for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
         if (threadIdx.x < WARPS_PER_BLOCK)
         {
