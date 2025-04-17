@@ -31,24 +31,29 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
     // So we can figure out which time step and antenna we are associated with.
 
     float2 sum;
+    const float2 data;
+    if (idx < n_cols * n_rows) {
+    data = d_data[idx];
+    } else {
+    data = {0.0f, 0.0f};
+    }
+
+    int offset_to_read;
+    float weight, phase, cos_phase,sin_phase;
 
 #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
         sum = {0.0f, 0.0f};
-        if (idx < n_cols * n_rows)
-        {
             // printf("Antenna %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
-            const float2 data = d_data[idx];
-            const int offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
-            const float weight = d_weights[offset_to_read];
-            const float phase = d_phase_offset[offset_to_read];
-            float cos_phase, sin_phase;
+            data = d_data[idx];
+            offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
+            weight = d_weights[offset_to_read];
+            phase = d_phase_offset[offset_to_read];
             sincosf(phase, &sin_phase, &cos_phase);
 
             sum.x += weight * (cos_phase * data.x - data.y * sin_phase);
             sum.y += weight * (data.x * sin_phase + data.y * cos_phase);
-        }
 
 #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2)
@@ -70,8 +75,8 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
     // This sum is necessary as threads above WARPS_PER_BLOCK are also participating
     // in the reduction.
     sum = {0.0f, 0.0f};
-#pragma unroll 
-for (int beam = 0; beam < NUM_BEAMS; beam++)
+#pragma unroll
+    for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
         if (threadIdx.x < WARPS_PER_BLOCK)
         {
