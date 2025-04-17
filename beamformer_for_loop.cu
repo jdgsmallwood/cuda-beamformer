@@ -20,34 +20,30 @@ typedef struct
     float r;
 } Antenna;
 
-__constant__ float d_weights[NUM_ANTENNAS * NUM_BEAMS];
-__constant__ float d_phase_offset[NUM_ANTENNAS * NUM_BEAMS];
+//__constant__ float2 d_weights_and_phase[NUM_ANTENNAS * NUM_BEAMS];
 
-__global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output)
+__global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output, const float2 __restrict__ *d_weights_and_phase)
 {
     __shared__ float2 shared_sum[WARPS_PER_BLOCK * NUM_BEAMS];
     __shared__ float2 shared_beam_sum[NUM_BEAMS];
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
     // Each data point will have NUM_ANTENNAS threads associated with it
     // So we can figure out which time step and antenna we are associated with.
-
-    float2 sum;
+    
+    float2 sum, weight_and_phase;
     const float2 data = d_data[idx];
 
     int offset_to_read;
-    float weight, phase, cos_phase, sin_phase;
 
 #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
         // printf("Antenna %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
         offset_to_read = beam * NUM_ANTENNAS + threadIdx.x;
-        weight = d_weights[offset_to_read];
-        phase = d_phase_offset[offset_to_read];
-        sincosf(phase, &sin_phase, &cos_phase);
-
-        sum.x = weight * (cos_phase * data.x - data.y * sin_phase);
-        sum.y = weight * (data.x * sin_phase + data.y * cos_phase);
+        weight_and_phase = d_weights_and_phase[offset_to_read];
+        
+        sum.x = weight_and_phase.y * data.x - data.y * weight_and_phase.x;
+        sum.y = data.x * weight_and_phase.x + data.y * weight_and_phase.y;
 
 #pragma unroll
         for (int offset = 16; offset > 0; offset /= 2)
@@ -205,7 +201,7 @@ void read_npy_file(const char *filename, float2 **data, int *n_rows, int *n_cols
 
 Antenna *read_antenna_map()
 {
-    FILE *file = fopen("../antenna_locations_only_used.csv", "r");
+    FILE *file = fopen("/fred/oz002/jsmallwo/antenna_locations_only_used.csv", "r");
     if (!file)
     {
         perror("Could not open file");
@@ -244,6 +240,9 @@ int main()
 
     float phase_offset[NUM_BEAMS * NUM_ANTENNAS];
     float weights[NUM_BEAMS * NUM_ANTENNAS];
+    float2 weights_and_phase[NUM_BEAMS * NUM_ANTENNAS];
+
+    float sin_phase, cos_phase;
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
         for (int i = 0; i < NUM_ANTENNAS; i++)
@@ -251,24 +250,22 @@ int main()
             // weights[i] = 1 / antennas[i].r;
             weights[beam * NUM_ANTENNAS + i] = beam; // Make things easy to start with.
             phase_offset[beam * NUM_ANTENNAS + i] = 0;
+
+            sincosf(phase_offset[beam * NUM_ANTENNAS + i], &sin_phase, &cos_phase);
+            weights_and_phase[beam * NUM_ANTENNAS + i] = {sin_phase * weights[beam * NUM_ANTENNAS + i], cos_phase * weights[beam * NUM_ANTENNAS + i]};
         }
     }
 
-    cudaError_t err = cudaMemcpyToSymbol(d_weights, weights, sizeof(float) * NUM_ANTENNAS * NUM_BEAMS);
-    if (err != cudaSuccess)
-    {
-        printf("CUDA copy to weights symbol failed.\n");
-        return -1;
-    }
 
-    err = cudaMemcpyToSymbol(d_phase_offset, phase_offset, sizeof(float) * NUM_ANTENNAS * NUM_BEAMS);
+    float2 *d_weights_and_phase = NULL;
+    cudaError_t err = cudaMalloc((void **)&d_weights_and_phase, sizeof(float2) * NUM_BEAMS * NUM_ANTENNAS);
     if (err != cudaSuccess)
     {
         printf("CUDA copy to phase offset symbol failed.\n");
         return -1;
     }
 
-    const char *filename = "../antenna_data_transposed.npy";
+    const char *filename = "/fred/oz002/jsmallwo/antenna_data_transposed.npy";
     float2 *data = NULL;
     int n_rows, n_cols;
     read_npy_file(filename, &data, &n_rows, &n_cols);
@@ -282,8 +279,7 @@ int main()
         printf("CUDA memory allocation failed\n");
         cudaFreeHost(data);
         cudaFreeHost(antennas);
-        cudaFree(d_weights);
-        cudaFree(d_phase_offset);
+        cudaFree(d_weights_and_phase);
         return -1;
     }
 
@@ -295,8 +291,7 @@ int main()
         cudaFreeHost(data);
         cudaFreeHost(antennas);
         cudaFree(d_data);
-        cudaFree(d_weights);
-        cudaFree(d_phase_offset);
+        cudaFree(d_weights_and_phase);
         return -1;
     }
 
@@ -309,8 +304,7 @@ int main()
         cudaFreeHost(antennas);
         cudaFree(d_data);
         cudaFree(d_output);
-        cudaFree(d_phase_offset);
-        cudaFree(d_weights);
+        cudaFree(d_weights_and_phase);
         return -1;
     }
 
@@ -321,21 +315,35 @@ int main()
         printf("CUDA stream creation failed\n");
         cudaFree(d_data);
         cudaFree(d_output);
-        cudaFree(d_weights);
-        cudaFree(d_phase_offset);
+        cudaFree(d_weights_and_phase);
         cudaFreeHost(data);
         cudaFreeHost(output);
         cudaFreeHost(antennas);
         return -1;
     }
 
+
+
+    err = cudaMemcpyAsync(d_weights_and_phase,weights_and_phase, NUM_BEAMS * NUM_ANTENNAS * sizeof(float2), cudaMemcpyHostToDevice, stream);
+
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory copy failed\n");
+        cudaFree(d_data);
+        cudaFree(d_weights_and_phase);
+        cudaFree(d_output);
+        cudaFreeHost(data);
+        cudaFreeHost(output);
+        cudaFreeHost(antennas);
+        cudaStreamDestroy(stream);
+        return -1;
+    }
     err = cudaMemcpyAsync(d_data, data, n_rows * n_cols * sizeof(float2), cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess)
     {
         printf("CUDA memory copy failed\n");
         cudaFree(d_data);
-        cudaFree(d_weights);
-        cudaFree(d_phase_offset);
+        cudaFree(d_weights_and_phase);
         cudaFree(d_output);
         cudaFreeHost(data);
         cudaFreeHost(output);
@@ -356,7 +364,7 @@ int main()
         printf("CUDA stream synchronization failed\n");
     }
 
-    beamform<<<dim3(n_rows, 1), NUM_ANTENNAS, 0, stream>>>(d_data, n_rows, n_cols, d_output);
+    beamform<<<dim3(n_rows, 1), NUM_ANTENNAS, 0, stream>>>(d_data, n_rows, n_cols, d_output, d_weights_and_phase);
 
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess)
@@ -368,9 +376,8 @@ int main()
     if (err != cudaSuccess)
     {
         printf("CUDA memory copy failed\n");
-        cudaFree(d_weights);
+        cudaFree(d_weights_and_phase);
         cudaFree(d_data);
-        cudaFree(d_phase_offset);
         cudaFree(d_output);
         cudaFreeHost(data);
         cudaFreeHost(output);
@@ -396,8 +403,7 @@ int main()
     }
 
     cudaFree(d_data);
-    cudaFree(d_weights);
-    cudaFree(d_phase_offset);
+    cudaFree(d_weights_and_phase);
     cudaFree(d_output);
     cudaFreeHost(antennas);
     cudaFreeHost(data);

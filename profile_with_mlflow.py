@@ -40,7 +40,7 @@ git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().stri
 
 # === Step 3: Define constants ===
 LOCAL_CU_FILE = "beamformer_for_loop.cu"
-REMOTE_PATH = "/fred/oz002/jsmallwo/cuda_beamformer/"
+REMOTE_PATH = "/home/jsmallwo/projects/cuda-beamformer/"
 REMOTE_CU = f"{REMOTE_PATH}/{LOCAL_CU_FILE}"
 REMOTE_EXEC_NAME = "beamformer"
 REMOTE_EXEC = f"./{REMOTE_EXEC_NAME}"
