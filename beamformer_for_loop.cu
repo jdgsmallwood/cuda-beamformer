@@ -20,13 +20,11 @@ typedef struct
     float r;
 } Antenna;
 
-typedef struct __align__(16)
+typedef struct __align__(8)
 {
     float2 data[NUM_BEAMS];
 } float2_beamarray;
 
-
-//__constant__ float2 d_weights_and_phase[NUM_ANTENNAS * NUM_BEAMS];
 
 __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output, const float2_beamarray __restrict__ *d_weights_and_phase)
 {
@@ -43,7 +41,6 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
 #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
-        // printf("Antenna %i: weight %f phase_offset %f\n", idx, weights[idx], phase_offset[idx]);
         weight_and_phase = weights_and_phase.data[beam];
         sum.x = weight_and_phase.y * data.x - data.y * weight_and_phase.x;
         sum.y = data.x * weight_and_phase.x + data.y * weight_and_phase.y;
