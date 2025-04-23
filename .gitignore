@@ -4,3 +4,4 @@ profile_results/
 mlruns/
 submit_job.sh
 test-ncu-rep-parsing.ipynb
+.devcontainer/

@@ -20,7 +20,7 @@ typedef struct
     float r;
 } Antenna;
 
-typedef struct 
+typedef struct
 {
     float data_x[NUM_BEAMS * NUM_ANTENNAS];
     float data_y[NUM_BEAMS * NUM_ANTENNAS];
@@ -32,27 +32,26 @@ typedef struct
     float data_y[NUM_BEAMS];
 } float2_single_beamarray;
 
-
-__global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output, const float2_beamarray __restrict__ *d_weights_and_phase)
+__global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float *__restrict__ d_output_x, float *__restrict__ d_output_y, const float2_beamarray __restrict__ *d_weights_and_phase)
 {
-    __shared__ float2 shared_sum[NUM_BEAMS];
+    __shared__ float2 partial_sum[NUM_BEAMS][WARPS_PER_BLOCK];
     const int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    int warp_id = threadIdx.x / 32;
+    int lane = threadIdx.x % 32;
     // Each data point will have NUM_ANTENNAS threads associated with it
     // So we can figure out which time step and antenna we are associated with.
-    
-    float2 sum, weight_and_phase;
+    float2 sum;
+    float2 weight_and_phase;
     const float2 data = d_data[idx];
-    float2_single_beamarray weights_and_phase; 
-    
-    for (int i = 0; i < NUM_BEAMS; i++) {
+    float2_single_beamarray weights_and_phase;
+
+    for (int i = 0; i < NUM_BEAMS; i++)
+    {
+        // __ldg recommends that this be cached to read-only memory
         weights_and_phase.data_x[i] = __ldg(&(d_weights_and_phase->data_x[i * NUM_ANTENNAS + threadIdx.x]));
         weights_and_phase.data_y[i] = __ldg(&(d_weights_and_phase->data_y[i * NUM_ANTENNAS + threadIdx.x]));
     }
 
-
-    if (threadIdx.x < NUM_BEAMS) {
-        shared_sum[threadIdx.x] = {0.0f, 0.0f};
-    }
 
 #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
@@ -70,18 +69,39 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
         }
 
         // Is it the first thread in the warp?
-        if (threadIdx.x % 32 == 0)
+        if (lane == 0)
         {
-            atomicAdd(&shared_sum[beam].x, sum.x);
-            atomicAdd(&shared_sum[beam].y, sum.y);
+            partial_sum[beam][warp_id].x = sum.x;
+            partial_sum[beam][warp_id].y = sum.y;
         }
     }
 
     __syncthreads();
 
+    for (int beam = 0; beam < NUM_BEAMS; beam++)
+    {
+        if (warp_id == 0)
+        {
+            float2 final_sum;
+            final_sum.x = partial_sum[beam][0].x;
+            final_sum.y = partial_sum[beam][0].y;
+            for (int i = 1; i < WARPS_PER_BLOCK; ++i)
+            {
+                final_sum.x += partial_sum[beam][i].x;
+                final_sum.y += partial_sum[beam][i].y;
+            }
+            if (lane == 0)
+            {
+                partial_sum[beam][0].x = final_sum.x;
+                partial_sum[beam][0].y = final_sum.y;
+            }
+        }
+    }
     if (threadIdx.x < NUM_BEAMS)
     {
-        d_output[blockIdx.x * NUM_BEAMS + threadIdx.x] = shared_sum[threadIdx.x];
+        int output_offset = blockIdx.x * NUM_BEAMS + threadIdx.x;
+        d_output_x[output_offset] = partial_sum[threadIdx.x][0].x;
+        d_output_y[output_offset] = partial_sum[threadIdx.x][0].y;
     }
 }
 
@@ -245,7 +265,7 @@ int main()
 
             sincosf(phase_offset[offset], &sin_phase, &cos_phase);
             weights_and_phase.data_x[ant_offset] = sin_phase * weights[offset];
-            weights_and_phase.data_y[ant_offset] =  cos_phase * weights[offset];
+            weights_and_phase.data_y[ant_offset] = cos_phase * weights[offset];
         }
     }
 
@@ -275,8 +295,19 @@ int main()
         return -1;
     }
 
-    float2 *d_output = NULL;
-    err = cudaMalloc((void **)&d_output, n_rows * NUM_BEAMS * sizeof(float2));
+    float *d_output_x = NULL;
+    err = cudaMalloc((void **)&d_output_x, n_rows * NUM_BEAMS * sizeof(float));
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory allocation failed\n");
+        cudaFreeHost(data);
+        cudaFreeHost(antennas);
+        cudaFree(d_data);
+        cudaFree(d_weights_and_phase);
+        return -1;
+    }
+    float *d_output_y = NULL;
+    err = cudaMalloc((void **)&d_output_y, n_rows * NUM_BEAMS * sizeof(float));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
@@ -287,45 +318,60 @@ int main()
         return -1;
     }
 
-    float2 *output = NULL;
-    err = cudaMallocHost((void **)&output, n_rows * NUM_BEAMS * sizeof(float2));
+    float *output_x = NULL;
+    err = cudaMallocHost((void **)&output_x, n_rows * NUM_BEAMS * sizeof(float));
     if (err != cudaSuccess)
     {
         printf("CUDA memory allocation failed\n");
         cudaFreeHost(data);
         cudaFreeHost(antennas);
         cudaFree(d_data);
-        cudaFree(d_output);
+        cudaFree(d_output_x);
+        cudaFree(d_output_y);
         cudaFree(d_weights_and_phase);
         return -1;
     }
-
+    float *output_y = NULL;
+    err = cudaMallocHost((void **)&output_y, n_rows * NUM_BEAMS * sizeof(float));
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory allocation failed\n");
+        cudaFreeHost(data);
+        cudaFreeHost(antennas);
+        cudaFree(d_data);
+        cudaFree(d_output_x);
+        cudaFree(d_output_y);
+        cudaFree(d_weights_and_phase);
+        return -1;
+    }
     cudaStream_t stream;
     err = cudaStreamCreate(&stream);
     if (err != cudaSuccess)
     {
         printf("CUDA stream creation failed\n");
         cudaFree(d_data);
-        cudaFree(d_output);
+        cudaFree(d_output_x);
+        cudaFree(d_output_y);
         cudaFree(d_weights_and_phase);
         cudaFreeHost(data);
-        cudaFreeHost(output);
+        cudaFreeHost(output_x);
+        cudaFreeHost(output_y);
         cudaFreeHost(antennas);
         return -1;
     }
 
-
-
-    err = cudaMemcpyAsync(d_weights_and_phase,&weights_and_phase, sizeof(float2_beamarray), cudaMemcpyHostToDevice, stream);
+    err = cudaMemcpyAsync(d_weights_and_phase, &weights_and_phase, sizeof(float2_beamarray), cudaMemcpyHostToDevice, stream);
 
     if (err != cudaSuccess)
     {
         printf("CUDA memory copy failed\n");
         cudaFree(d_data);
         cudaFree(d_weights_and_phase);
-        cudaFree(d_output);
+        cudaFree(d_output_x);
+        cudaFree(d_output_y);
         cudaFreeHost(data);
-        cudaFreeHost(output);
+        cudaFreeHost(output_x);
+        cudaFreeHost(output_y);
         cudaFreeHost(antennas);
         cudaStreamDestroy(stream);
         return -1;
@@ -336,9 +382,11 @@ int main()
         printf("CUDA memory copy failed\n");
         cudaFree(d_data);
         cudaFree(d_weights_and_phase);
-        cudaFree(d_output);
+        cudaFree(d_output_x);
+        cudaFree(d_output_y);
         cudaFreeHost(data);
-        cudaFreeHost(output);
+        cudaFreeHost(output_x);
+        cudaFreeHost(output_y);
         cudaFreeHost(antennas);
         cudaStreamDestroy(stream);
         return -1;
@@ -356,7 +404,7 @@ int main()
         printf("CUDA stream synchronization failed\n");
     }
 
-    beamform<<<dim3(n_rows, 1), NUM_ANTENNAS, 0, stream>>>(d_data, n_rows, n_cols, d_output, d_weights_and_phase);
+    beamform<<<dim3(n_rows, 1), NUM_ANTENNAS, 0, stream>>>(d_data, n_rows, n_cols, d_output_x, d_output_y, d_weights_and_phase);
 
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess)
@@ -364,15 +412,32 @@ int main()
         printf("CUDA stream synchronization failed\n%s\n", cudaGetErrorString(err));
     }
 
-    err = cudaMemcpyAsync(output, d_output, n_rows * NUM_BEAMS * sizeof(float2), cudaMemcpyDeviceToHost, stream);
+    err = cudaMemcpyAsync(output_x, d_output_x, n_rows * NUM_BEAMS * sizeof(float), cudaMemcpyDeviceToHost, stream);
     if (err != cudaSuccess)
     {
         printf("CUDA memory copy failed\n");
         cudaFree(d_weights_and_phase);
         cudaFree(d_data);
-        cudaFree(d_output);
+        cudaFree(d_output_x);
+        cudaFree(d_output_y);
         cudaFreeHost(data);
-        cudaFreeHost(output);
+        cudaFreeHost(output_x);
+        cudaFreeHost(output_y);
+        cudaStreamDestroy(stream);
+        return -1;
+    }
+
+    err = cudaMemcpyAsync(output_y, d_output_y, n_rows * NUM_BEAMS * sizeof(float), cudaMemcpyDeviceToHost, stream);
+    if (err != cudaSuccess)
+    {
+        printf("CUDA memory copy failed\n");
+        cudaFree(d_weights_and_phase);
+        cudaFree(d_data);
+        cudaFree(d_output_x);
+        cudaFree(d_output_y);
+        cudaFreeHost(data);
+        cudaFreeHost(output_x);
+        cudaFreeHost(output_y);
         cudaStreamDestroy(stream);
         return -1;
     }
@@ -388,7 +453,7 @@ int main()
         printf("First 5 values of beam %i are...\n", beam);
         for (int i = 0; i < 5; i++)
         {
-            printf("%f + %fi\n", output[i * n_rows + beam].x, output[i * n_rows + beam].y);
+            printf("%f + %fi\n", output_x[i * n_rows + beam], output_y[i * n_rows + beam]);
         }
 
         // printf("%f + %fi\n", output[beam * (n_rows + 1) - 1].real, output[beam * (n_rows + 1) - 1].imag);
@@ -396,10 +461,12 @@ int main()
 
     cudaFree(d_data);
     cudaFree(d_weights_and_phase);
-    cudaFree(d_output);
+    cudaFree(d_output_x);
+    cudaFree(d_output_y);
     cudaFreeHost(antennas);
     cudaFreeHost(data);
-    cudaFreeHost(output);
+    cudaFreeHost(output_x);
+    cudaFreeHost(output_y);
     cudaStreamDestroy(stream);
     return 0;
 }
