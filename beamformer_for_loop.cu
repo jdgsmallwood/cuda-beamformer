@@ -20,10 +20,17 @@ typedef struct
     float r;
 } Antenna;
 
-typedef struct __align__(16)
+typedef struct 
 {
-    float2 data[NUM_BEAMS];
+    float data_x[NUM_BEAMS * NUM_ANTENNAS];
+    float data_y[NUM_BEAMS * NUM_ANTENNAS];
 } float2_beamarray;
+
+typedef struct
+{
+    float data_x[NUM_BEAMS];
+    float data_y[NUM_BEAMS];
+} float2_single_beamarray;
 
 
 __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 __restrict__ *d_output, const float2_beamarray __restrict__ *d_weights_and_phase)
@@ -35,7 +42,13 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
     
     float2 sum, weight_and_phase;
     const float2 data = d_data[idx];
-    const float2_beamarray weights_and_phase = d_weights_and_phase[threadIdx.x];
+    float2_single_beamarray weights_and_phase; 
+    
+    for (int i = 0; i < NUM_BEAMS; i++) {
+        weights_and_phase.data_x[i] = __ldg(&(d_weights_and_phase->data_x[i * NUM_ANTENNAS + threadIdx.x]));
+        weights_and_phase.data_y[i] = __ldg(&(d_weights_and_phase->data_y[i * NUM_ANTENNAS + threadIdx.x]));
+    }
+
 
     if (threadIdx.x < NUM_BEAMS) {
         shared_sum[threadIdx.x] = {0.0f, 0.0f};
@@ -44,7 +57,8 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
 #pragma unroll
     for (int beam = 0; beam < NUM_BEAMS; beam++)
     {
-        weight_and_phase = weights_and_phase.data[beam];
+        weight_and_phase.x = weights_and_phase.data_x[beam];
+        weight_and_phase.y = weights_and_phase.data_y[beam];
         sum.x = weight_and_phase.y * data.x - data.y * weight_and_phase.x;
         sum.y = data.x * weight_and_phase.x + data.y * weight_and_phase.y;
 
@@ -216,7 +230,7 @@ int main()
 
     float phase_offset[NUM_BEAMS * NUM_ANTENNAS];
     float weights[NUM_BEAMS * NUM_ANTENNAS];
-    float2_beamarray weights_and_phase[NUM_ANTENNAS];
+    float2_beamarray weights_and_phase;
 
     float sin_phase, cos_phase;
     for (int beam = 0; beam < NUM_BEAMS; beam++)
@@ -225,16 +239,18 @@ int main()
         {
             // weights[i] = 1 / antennas[i].r;
             int offset = i * NUM_BEAMS + beam;
+            int ant_offset = beam * NUM_ANTENNAS + i;
             weights[offset] = beam; // Make things easy to start with.
             phase_offset[offset] = 0;
 
             sincosf(phase_offset[offset], &sin_phase, &cos_phase);
-            weights_and_phase[i].data[beam] = {sin_phase * weights[offset], cos_phase * weights[offset]};
+            weights_and_phase.data_x[ant_offset] = sin_phase * weights[offset];
+            weights_and_phase.data_y[ant_offset] =  cos_phase * weights[offset];
         }
     }
 
     float2_beamarray *d_weights_and_phase = NULL;
-    cudaError_t err = cudaMalloc((void **)&d_weights_and_phase, sizeof(float2_beamarray) * NUM_ANTENNAS);
+    cudaError_t err = cudaMalloc((void **)&d_weights_and_phase, sizeof(float2_beamarray));
     if (err != cudaSuccess)
     {
         printf("CUDA copy to phase offset symbol failed.\n");
@@ -300,7 +316,7 @@ int main()
 
 
 
-    err = cudaMemcpyAsync(d_weights_and_phase,weights_and_phase, NUM_ANTENNAS * sizeof(float2_beamarray), cudaMemcpyHostToDevice, stream);
+    err = cudaMemcpyAsync(d_weights_and_phase,&weights_and_phase, sizeof(float2_beamarray), cudaMemcpyHostToDevice, stream);
 
     if (err != cudaSuccess)
     {
