@@ -31,6 +31,7 @@ parser.add_argument(
 )
 parser.add_argument("change_description", type=str, help="What did you change?")
 parser.add_argument("hypothesis", type=str, help="Hypothesis for the profiling run")
+parser.add_argument("number_of_beams", type=int, help="Number of beams", default=-1)
 
 # Parse arguments
 args = parser.parse_args()
@@ -210,7 +211,7 @@ with mlflow.start_run(description=description) as run:
     logger.info("Logging parameters...")
     mlflow.log_params(model_params)
     mlflow.log_param("git_commit_hash", get_git_commit())
-
+    mlflow.log_param("number_of_beams", args.number_of_beams)
     logger.info("Logging metrics...")
     metrics = extract_metrics_from_csv(data)
     mlflow.log_metrics(metrics)

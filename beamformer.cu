@@ -30,16 +30,14 @@ typedef struct
     float2 data[NUM_BEAMS];
 } float2_single_beamarray;
 
-__global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, const int n_cols, float2 *__restrict__ d_output, const float2_beamarray __restrict__ *d_weights_and_phase)
+__global__ void beamform(const float2 *__restrict__ d_data, float2 *__restrict__ d_output, const float2_beamarray __restrict__ *d_weights_and_phase)
 {
     __shared__ float2 partial_sum[NUM_BEAMS][WARPS_PER_BLOCK];
-    const int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    // Each data point will have NUM_ANTENNAS threads associated with it
-    // So we can figure out which time step and antenna we are associated with.
     float2 sum;
-    const float2 data = d_data[idx];
+    const float2 data = d_data[blockIdx.x * blockDim.x + threadIdx.x];
     float2_single_beamarray weights_and_phase;
 
+#pragma unroll
     for (int i = 0; i < NUM_BEAMS; i++)
     {
         // __ldg recommends that this be cached to read-only memory
@@ -59,7 +57,7 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
             sum.y += __shfl_down_sync(FULL_MASK, sum.y, offset);
         }
 
-        // Is it the first thread in the warp?
+        // Is it the first thread in the warp? If so write to shared memory.
         if (threadIdx.x % 32 == 0)
         {
             partial_sum[beam][threadIdx.x / 32] = sum;
@@ -71,6 +69,7 @@ __global__ void beamform(const float2 *__restrict__ d_data, const int n_rows, co
     if (threadIdx.x < NUM_BEAMS)
     {
         sum = partial_sum[threadIdx.x][0];
+#pragma unroll
         for (int i = 1; i < WARPS_PER_BLOCK; ++i)
         {
             sum.x += partial_sum[threadIdx.x][i].x;
@@ -235,7 +234,7 @@ int main()
             // weights[i] = 1 / antennas[i].r;
             int offset = i * NUM_BEAMS + beam;
             int ant_offset = beam * NUM_ANTENNAS + i;
-            weights[offset] = beam; // Make things easy to start with.
+            weights[offset] = beam % 4; // Make things easy to start with.
             phase_offset[offset] = 0;
 
             sincosf(phase_offset[offset], &sin_phase, &cos_phase);
@@ -347,7 +346,7 @@ int main()
         printf("CUDA stream synchronization failed\n");
     }
 
-    beamform<<<dim3(n_rows, 1), NUM_ANTENNAS, 0, stream>>>(d_data, n_rows, n_cols, d_output, d_weights_and_phase);
+    beamform<<<dim3(n_rows, 1), NUM_ANTENNAS, 0, stream>>>(d_data, d_output, d_weights_and_phase);
 
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess)
@@ -382,7 +381,6 @@ int main()
             printf("%f + %fi\n", output[i * n_rows + beam].x, output[i * n_rows + beam].y);
         }
 
-        // printf("%f + %fi\n", output[beam * (n_rows + 1) - 1].real, output[beam * (n_rows + 1) - 1].imag);
     }
 
     cudaFree(d_data);
