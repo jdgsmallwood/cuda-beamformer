@@ -34,6 +34,7 @@ Shaded regions show spread of different memory types (global vs texture) when th
 
 ![Cache Throughput vs Num Beams](plots/cache_throughput_vs_num_beams.png)
 
+There was an approximately linear increase in duration for an increase in number of beams.
 ![Duration vs Num Beams](plots/duration_per_beam_vs_num_beams.png)
 ![Occupancy vs Num Beams](plots/occupancy_vs_num_beams.png)
 ![Compute Throughput vs Num Beams](plots/compute_throughput_vs_num_beams.png)
