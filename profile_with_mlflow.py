@@ -1,10 +1,7 @@
 import subprocess
 import os
 import mlflow
-import tempfile
-import shutil
 import argparse
-import time
 import pandas as pd
 from loguru import logger
 from datetime import datetime
@@ -40,7 +37,7 @@ args = parser.parse_args()
 git_commit = subprocess.check_output(["git", "rev-parse", "HEAD"]).decode().strip()
 
 # === Step 3: Define constants ===
-LOCAL_CU_FILE = "beamformer_for_loop.cu"
+LOCAL_CU_FILE = "beamformer.cu"
 REMOTE_PATH = "/home/jsmallwo/projects/cuda-beamformer/"
 REMOTE_CU = f"{REMOTE_PATH}/{LOCAL_CU_FILE}"
 REMOTE_EXEC_NAME = "beamformer"
