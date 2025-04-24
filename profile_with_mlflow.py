@@ -64,6 +64,8 @@ params = {
 }
 
 
+NUM_BEAMS_VAR = "" if args.number_of_beams == -1 else f" -DNUM_BEAMS={args.number_of_beams}"
+
 # Template string for the SLURM shell script
 # This will spin up a session with a GPU, compile and profile the code, then create a CSV file for output.
 slurm_script = f"""#!/bin/bash
@@ -73,12 +75,12 @@ slurm_script = f"""#!/bin/bash
 #
 #SBATCH --ntasks=1
 #SBATCH --time=02:30
-#SBATCH --mem=16g
+#SBATCH --mem=64g
 #SBATCH --gres=gpu:1
 
 srun cd {params['REMOTE_PATH']} && \\
     source setup.sh && \\
-    nvcc --gpu-architecture=sm_80 -O3 --use_fast_math {params['LOCAL_CU_FILE']} -o {params['REMOTE_EXEC_NAME']}  && \\
+    nvcc --gpu-architecture=sm_80 -O3 --use_fast_math{NUM_BEAMS_VAR} {params['LOCAL_CU_FILE']} -o {params['REMOTE_EXEC_NAME']}  && \\
     ncu -f --set full --target-processes all --export {params['PROFILE_OUTPUT']} {params['REMOTE_EXEC']} && \\
     ncu --import {params['PROFILE_OUTPUT']}.ncu-rep --csv --page details > {params['PROFILE_OUTPUT']}.csv
 """

@@ -8,7 +8,11 @@
 #define MAGIC_STRING_LEN 6
 #define MAX_LINE_LENGTH 1024
 #define NUM_ANTENNAS 196
-#define NUM_BEAMS 5
+
+#ifndef NUM_BEAMS
+#define NUM_BEAMS 10
+#endif
+
 #define WARPS_PER_BLOCK 7
 #define FULL_MASK 0xffffffff
 
@@ -30,7 +34,7 @@ typedef struct
     float2 data[NUM_BEAMS];
 } float2_single_beamarray;
 
-__global__ void beamform(const float2 *__restrict__ d_data, float2 *__restrict__ d_output, const float2_beamarray __restrict__ *d_weights_and_phase)
+__global__ void beamform(const float2 *__restrict__ d_data, float2 *__restrict__ d_output, cudaTextureObject_t tex_weights_and_phase)
 {
     __shared__ float2 partial_sum[NUM_BEAMS][WARPS_PER_BLOCK];
     float2 sum;
@@ -40,8 +44,7 @@ __global__ void beamform(const float2 *__restrict__ d_data, float2 *__restrict__
 #pragma unroll
     for (int i = 0; i < NUM_BEAMS; i++)
     {
-        // __ldg recommends that this be cached to read-only memory
-        weights_and_phase.data[i] = __ldg(&(d_weights_and_phase->data[i * NUM_ANTENNAS + threadIdx.x]));
+        weights_and_phase.data[i] = tex1Dfetch<float2>(tex_weights_and_phase, i * NUM_ANTENNAS + threadIdx.x);
     }
 
 #pragma unroll
@@ -241,6 +244,9 @@ int main()
             weights_and_phase.data[ant_offset] = {sin_phase * weights[offset], cos_phase * weights[offset]};
         }
     }
+    cudaTextureObject_t tex_weights_and_phase;
+
+    cudaChannelFormatDesc channelDesc = cudaCreateChannelDesc<float2>();
 
     float2_beamarray *d_weights_and_phase = NULL;
     cudaError_t err = cudaMalloc((void **)&d_weights_and_phase, sizeof(float2_beamarray));
@@ -320,6 +326,18 @@ int main()
         cudaStreamDestroy(stream);
         return -1;
     }
+
+    // bind to texture memory
+    cudaResourceDesc resDesc = {};
+    resDesc.resType = cudaResourceTypeLinear;
+    resDesc.res.linear.devPtr = (void *)d_weights_and_phase;
+    resDesc.res.linear.sizeInBytes = sizeof(float2_beamarray);
+    resDesc.res.linear.desc = channelDesc;
+    cudaTextureDesc texDesc = {};
+    texDesc.readMode = cudaReadModeElementType; // We only need to read from it
+
+    cudaCreateTextureObject(&tex_weights_and_phase, &resDesc, &texDesc, nullptr);
+
     err = cudaMemcpyAsync(d_data, data, n_rows * n_cols * sizeof(float2), cudaMemcpyHostToDevice, stream);
     if (err != cudaSuccess)
     {
@@ -346,7 +364,7 @@ int main()
         printf("CUDA stream synchronization failed\n");
     }
 
-    beamform<<<dim3(n_rows, 1), NUM_ANTENNAS, 0, stream>>>(d_data, d_output, d_weights_and_phase);
+    beamform<<<dim3(n_rows, 1), NUM_ANTENNAS, 0, stream>>>(d_data, d_output, tex_weights_and_phase);
 
     err = cudaStreamSynchronize(stream);
     if (err != cudaSuccess)
@@ -380,7 +398,6 @@ int main()
         {
             printf("%f + %fi\n", output[i * n_rows + beam].x, output[i * n_rows + beam].y);
         }
-
     }
 
     cudaFree(d_data);
