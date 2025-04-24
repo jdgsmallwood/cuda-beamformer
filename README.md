@@ -9,7 +9,7 @@ The weights & phase offsets are currently set to convenient values to allow easy
 
 - Constant memory should be reserved for small values only:
   - The weights needed to be accessed over and over again, I tried to cache them in constant memory. This caused a memory IO bottleneck & performance was far better using them in global memory with const \_\_restrict\_\_. Very slightly better was using texture memory which I ended up using at the end.
-  - This showed up as very high ADU pipe utilization.
+  - Constant memory bottleneck showed up as very high ADU pipe utilization.
 - Storing intermediate values in shared memory and then summing was far faster than using atomicAdd.
 - I tried to read all beamweights for each thread all at once, but reading many floats from adjacent memory was slower than storing them separately and reading NUM_BEAMS times.
 - #pragma unroll gives a modest speed-up for small loops.
